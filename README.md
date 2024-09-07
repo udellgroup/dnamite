@@ -1,3 +1,3 @@
 # DNAMite
 
-Code repository for paper DNAMite model, for NeurIPS 2024.
+Code repository for paper DNAMite model, for ML4H 2024.
