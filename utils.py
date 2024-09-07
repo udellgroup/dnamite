@@ -123,7 +123,7 @@ def get_pseudo_values(y, eval_times):
 def get_dataset(dataset_name):
         
     if dataset_name == "support":
-        if not os.path.exists("/home/mvanness/dnamite/private_repo/discrete_nam/data/support.csv"):
+        if not os.path.exists("data/support.csv"):
             print("Copying SUPPORT dataset from survml Github")
             
             df = pd.read_csv("https://raw.githubusercontent.com/survml/survml-deepsurv/main/data/support_parsed.csv")
@@ -144,9 +144,9 @@ def get_dataset(dataset_name):
                 related_columns = [col for col in df.columns if col.startswith(prefix)]
                 df[prefix] = df.apply(find_value, axis=1)
                 
-            df.to_csv("/home/mvanness/dnamite/private_repo/discrete_nam/data/support.csv", index=False)
+            df.to_csv("data/support.csv", index=False)
             
-        data = pd.read_csv("/home/mvanness/dnamite/private_repo/discrete_nam/data/support.csv")
+        data = pd.read_csv("data/support.csv")
         X = data.drop(["time", "dead"], axis=1)
         y = np.array(list(zip(data["dead"], data["time"])), dtype=[('event', 'bool'), ('time', 'float32')]) 
         
@@ -158,7 +158,7 @@ def get_dataset(dataset_name):
     
     elif dataset_name == "metabric":
         
-        if not os.path.exists("/home/mvanness/dnamite/private_repo/discrete_nam/data/metabric.csv"):
+        if not os.path.exists("data/metabric.csv"):
             
             print("Copying METABRIC dataset from DeepHit Github")
             X = pd.read_csv(
@@ -169,10 +169,10 @@ def get_dataset(dataset_name):
                 "https://raw.githubusercontent.com/chl8856/DeepHit/master/sample%20data/METABRIC/label.csv"
             )
 
-            pd.concat([X, y], axis=1).to_csv("/home/mvanness/dnamite/private_repo/discrete_nam/data/metabric.csv", index=False)
+            pd.concat([X, y], axis=1).to_csv("data/metabric.csv", index=False)
             
         
-        data = pd.read_csv("/home/mvanness/dnamite/private_repo/discrete_nam/data/metabric.csv")
+        data = pd.read_csv("data/metabric.csv")
         X = data.drop(["event_time", "label"], axis=1)
         y = np.array(list(zip(data["label"], data["event_time"])), dtype=[('event', 'bool'), ('time', 'float32')])
         
@@ -198,7 +198,7 @@ def get_dataset(dataset_name):
     
     elif dataset_name == "unos":
         
-        data = pd.read_parquet("/home/mvanness/dnamite/private_repo/discrete_nam/data/patients.parquet")
+        data = pd.read_parquet("data/patients.parquet")
         X = data.drop(["event", "time"], axis=1)
         y = np.array(list(zip(data["event"], data["time"])), dtype=[('event', 'bool'), ('time', 'float32')])
         
@@ -206,7 +206,7 @@ def get_dataset(dataset_name):
     
     elif dataset_name == "heart_failure":
         
-        data = pd.read_csv("/home/mvanness/dnamite/private_repo/discrete_nam/data/med_paper_pcphf_data_all_term.csv")
+        data = pd.read_csv("data/med_paper_pcphf_data_all_term.csv")
         X = data.drop([
             "person_id",
             "censor",
