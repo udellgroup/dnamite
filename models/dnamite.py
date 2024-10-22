@@ -277,8 +277,8 @@ class BaseSingleSplitDNAMiteModel(nn.Module):
         kernel_offset = coordinate_tensor - pair_kernel_size
         
         weights = torch.exp(
-            -torch.square(kernel_offset).sum(dim=2).to(self.device)
-        ) / (2 * self.pair_kernel_weight)
+            -torch.square(kernel_offset).sum(dim=2).to(self.device) / (2 * self.pair_kernel_weight)
+        )
         
         return weights
         
