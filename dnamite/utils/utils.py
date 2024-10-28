@@ -5,14 +5,15 @@ from interpret.utils._native import Native
 from sksurv.nonparametric import kaplan_meier_estimator
 from tqdm import tqdm
 import os
-from sklearn.model_selection import train_test_split
 
-# Function to discretize a feature into bins
-# Based on the binning method used in EBMs in interpret package
-# x: feature to discretize
-# max_bins: maximum number of bins
-# bins: optional bins to use
 def discretize(x, max_bins, bins=None):
+    """
+    # Function to discretize a feature into bins
+    # Based on the binning method used in EBMs in interpret package
+    # x: feature to discretize
+    # max_bins: maximum number of bins
+    # bins: optional bins to use
+    """
     
     # Convert x to numpy if pandas
     if isinstance(x, pd.Series):
@@ -43,9 +44,11 @@ def discretize(x, max_bins, bins=None):
     
     return x_discrete, bins
 
-# Function to get bin counts from a discretized feature
-# x: discretized feature
 def get_bin_counts(x, nbins):
+    """
+    # Function to get bin counts from a discretized feature
+    # x: discretized feature
+    """
     
     # Convert to pandas series if numpy
     if isinstance(x, np.ndarray):
@@ -64,9 +67,11 @@ def get_bin_counts(x, nbins):
         
     return counts_corrected
 
-# Function to get the bin counts for a pair of discretized features
-# x, y: discretized features
 def get_pair_bin_counts(x, y):
+    """
+    # Function to get the bin counts for a pair of discretized features
+    # x, y: discretized features
+    """
     
     # Get the value counts for each unique pair in x, y
     counts = pd.crosstab(x, y)
@@ -86,6 +91,9 @@ def get_pair_bin_counts(x, y):
     return counts
 
 def get_pseudo_values(y, eval_times):
+    """
+    # Function to get pseudo-values for a dataset
+    """
 
     full_km_times, full_km = kaplan_meier_estimator(y["event"], y["time"])
     
@@ -119,8 +127,10 @@ def get_pseudo_values(y, eval_times):
 
     return np.stack(pseudo_values, axis=0)
 
-# Function to get a dataset given a name
 def get_dataset(dataset_name):
+    """
+    Function to get a dataset given a name
+    """
         
     if dataset_name == "support":
         if not os.path.exists("data/support.csv"):

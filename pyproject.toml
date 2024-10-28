@@ -1,0 +1,31 @@
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dnamite"
+version = "0.1.0"
+description = "Implementation of DNAMite, an interpretable model for survival analysis and more."
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+authors = [
+    { name="Mike Van Ness", email="mvanness354@gmail.com" }
+]
+dependencies = [
+    "numpy>=1.23.5",
+    "pandas>=2.2.3",
+    "PyYAML>=6.0.2",
+    "scikit_learn>=1.3.2",
+    "scikit_survival>=0.22.2",
+    "torch>=1.13.1",
+    "tqdm>=4.64.1",
+] 
+
+[tool.setuptools.packages]
+find = {}  # Automatically find all packages and subpackages

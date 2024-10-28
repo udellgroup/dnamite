@@ -1,6 +1,9 @@
+"""
+SAMPLE BEGINNING OF FILE DOCSTRING
+"""
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -10,14 +13,15 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.compose import make_column_transformer
 from sklearn.pipeline import make_pipeline
-from nam import BaseSingleSplitNAM
+from .nam import BaseSingleSplitNAM
 from sksurv.nonparametric import kaplan_meier_estimator
+from dnamite.loss_fns import rps_loss
 
-import sys
-sys.path.append("../")
-from loss_fns import rps_loss
-    
+
 class DyS(nn.Module):
+    """  
+    DyS
+    """
     
     def __init__(
         self, 

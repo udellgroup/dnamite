@@ -1,33 +1,25 @@
-'''
-    The original Transformer code is from: http://nlp.seas.harvard.edu/2018/04/03/attention.html
-'''
+"""
+SAMPLE BEGINNING OF FILE DOCSTRING
+"""
 
-import os,sys
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math, copy, time
+import math
+import copy
 from torch.autograd import Variable
-from torch.utils.data import Dataset, DataLoader
-import pandas as pd
-import argparse
+from torch.utils.data import Dataset
 from operator import itemgetter
 
-import pandas as pd
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
-from itertools import combinations
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.compose import make_column_transformer
 from sklearn.pipeline import make_pipeline
-from nam import BaseSingleSplitNAM
 from sksurv.nonparametric import kaplan_meier_estimator
-
-import sys
-sys.path.append("../")
-from loss_fns import bce_surv_loss
+from dnamite.loss_fns import bce_surv_loss
 
 class TranDataset(Dataset):
     def __init__(self, features, labels, max_time, is_train=True):
@@ -282,7 +274,7 @@ class SATransformerSingleSplit(nn.Module):
         best_test_loss = float('inf')
 
         for epoch in range(n_epochs):
-            train_loss = train_epoch_fn(self, train_loader, optimizer)
+            train_epoch_fn(self, train_loader, optimizer)
             test_loss, test_preds = test_epoch_fn(self, test_loader)
             
             # print(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f} | Num Feats: {len([z for z in self.get_smooth_z() if z > 0])}")
@@ -309,6 +301,9 @@ class SATransformerSingleSplit(nn.Module):
         return
     
 class SATransformer(nn.Module):
+    """   
+    SATransformer
+    """
     
     def __init__(
         self, 

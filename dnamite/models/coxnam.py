@@ -1,29 +1,32 @@
+"""
+SAMPLE BEGINNING OF FILE DOCSTRING
+"""
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
-from itertools import combinations
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.compose import make_column_transformer
 from sklearn.pipeline import make_pipeline
-from nam import BaseSingleSplitNAM
+from .nam import BaseSingleSplitNAM
 from sksurv.nonparametric import kaplan_meier_estimator
+from sksurv.linear_model.coxph import BreslowEstimator
+from dnamite.loss_fns import coxph_loss
 
-import sys
-sys.path.append("../")
-from loss_fns import pseudo_value_loss
-    
-class PseudoNAM(nn.Module):
+
+class CoxNAM(nn.Module):
+    """ 
+    CoxNAM
+    """
     
     def __init__(
         self, 
         n_features, 
         n_hidden, 
-        n_output, 
         validation_size=0.2,
         n_val_splits=5,
         learning_rate=1e-4,
@@ -35,7 +38,6 @@ class PseudoNAM(nn.Module):
         super().__init__()
         self.n_features = n_features
         self.n_hidden = n_hidden
-        self.n_output = n_output
         self.validation_size = validation_size
         self.n_val_splits = n_val_splits
         self.learning_rate = learning_rate
@@ -69,66 +71,23 @@ class PseudoNAM(nn.Module):
         else:
             X = self.preprocessor.transform(X)
             
-        return X
-    
-    def get_pseudo_values(self, y, eval_times):
-        
-        print("GETTING PSEUDO VALUES")
-
-        full_km_times, full_km = kaplan_meier_estimator(y["event"], y["time"])
-        
-        full_km = full_km[np.clip(np.searchsorted(full_km_times, eval_times), 0, len(full_km_times)-1)]
-        
-        n = len(y)
-
-        pseudo_values = []
-        for i in tqdm(range(len(y)), leave=False):
-            jackknife_times, jackknife_km = kaplan_meier_estimator(
-                np.delete(y["event"], i), 
-                np.delete(y["time"], i)
-            )
-            
-            # Insert missing time
-            index = np.searchsorted(jackknife_times, y["time"][i], side="right")
-            
-            if index == len(jackknife_times):
-                # Insert at end
-                jackknife_km = np.insert(jackknife_km, index, jackknife_km[index-1])
-            
-            elif jackknife_times[index-1] != y["time"][i]:
-                jackknife_km = np.insert(jackknife_km, index, jackknife_km[index-1])
-                
-                
-            jackknife_km = jackknife_km[
-                np.clip(np.searchsorted(jackknife_times, eval_times), 0, len(jackknife_times)-1)
-            ]
-            
-            pseudo_values.append(n * full_km - (n-1) * jackknife_km)
-
-        return np.stack(pseudo_values, axis=0)
-                    
+        return X    
         
     
-    def get_data_loader(self, X, pseudo_values, pairs=None, shuffle=True):
+    def get_data_loader(self, X, y, pairs=None, shuffle=True):
+        
+        assert "time" in y.dtype.names and "event" in y.dtype.names, \
+            "y must be a structured array with 'time' and 'event' fields."
         
         # Convert X to numpy if pandas
         if hasattr(X, 'values'):
             X = X.values
-        if pairs is not None:
-            if hasattr(pairs, 'values'):
-                pairs = pairs.values
-
-        if pairs is not None:
-            dataset = torch.utils.data.TensorDataset(
-                torch.FloatTensor(X), 
-                torch.FloatTensor(pairs),
-                torch.FloatTensor(pseudo_values),
-            )
-        else:
-            dataset = torch.utils.data.TensorDataset(
-                torch.FloatTensor(X), 
-                torch.FloatTensor(pseudo_values),
-            )
+            
+        dataset = torch.utils.data.TensorDataset(
+            torch.FloatTensor(X), 
+            torch.BoolTensor(y["event"]),
+            torch.FloatTensor(y["time"].copy()),
+        )
         loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=shuffle)
         
         return loader
@@ -137,17 +96,16 @@ class PseudoNAM(nn.Module):
         model.train()
         total_loss = 0
 
-        for X_main, pseudo_vals in tqdm(train_loader, leave=False):
+        for X_main, events, times in tqdm(train_loader, leave=False):
 
-            X_main, pseudo_vals = X_main.to(self.device), pseudo_vals.to(self.device)
+            X_main, events, times = X_main.to(self.device), events.to(self.device), times.to(self.device)
 
-            y_pred = model(mains=X_main)
+            y_pred = model(mains=X_main).squeeze()
             
-            surv_preds = 1 - torch.sigmoid(y_pred)
-            
-            loss = pseudo_value_loss(
-                surv_preds, 
-                pseudo_vals
+            loss = coxph_loss(
+                y_pred,
+                events,
+                times
             )
             
             if model.penalized:
@@ -167,19 +125,18 @@ class PseudoNAM(nn.Module):
         preds = []
         
         with torch.no_grad():
-            for X_main, pseudo_vals in tqdm(test_loader, leave=False):
+            for X_main, events, times in tqdm(test_loader, leave=False):
 
-                X_main, pseudo_vals = X_main.to(self.device), pseudo_vals.to(self.device)
+                X_main, events, times = X_main.to(self.device), events.to(self.device), times.to(self.device)
 
-                y_pred = model(mains=X_main)
+                y_pred = model(mains=X_main).squeeze()
         
                 preds.append(y_pred.detach())
             
-                surv_preds = 1 - torch.sigmoid(y_pred)
-                
-                loss = pseudo_value_loss(
-                    surv_preds, 
-                    pseudo_vals
+                loss = coxph_loss(
+                    y_pred,
+                    events,
+                    times
                 )
                 
                 if model.penalized:
@@ -202,11 +159,10 @@ class PseudoNAM(nn.Module):
         model = BaseSingleSplitNAM(
             n_features=self.n_features, 
             n_hidden=self.n_hidden, 
-            n_output=self.n_output,
+            n_output=1,
             device=self.device,
             **self.model_args
         ).to(self.device)
-        
         
         optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
         model.train_(
@@ -220,27 +176,13 @@ class PseudoNAM(nn.Module):
         
         return model
     
-    def fit(self, X, y):
+    def fit(self, X, y, fit_baseline=True):
         
         # Preprocess features
-        X = self.preprocess_data(X)
+        X_processed = self.preprocess_data(X)
         
-        self.feature_names_in_ = X.columns
-        self.n_features = X.shape[1]
-        
-        # Get evaluation times before train/val split
-        quantiles = torch.quantile(
-            torch.FloatTensor(y["time"].copy()),
-            torch.linspace(0, 1, self.n_output+2)
-        )
-
-        self.eval_times = quantiles[1:-1].to(self.device)
-        
-        # Remove duplicates in eval times
-        if len(self.eval_times.unique()) < len(self.eval_times):
-            self.eval_times = self.eval_times.unique()
-            self.n_output = len(self.eval_times)
-        
+        self.feature_names_in_ = X_processed.columns
+        self.n_features = X_processed.shape[1]
         
         # Fit several models, one for each validation split
         self.models = []
@@ -248,17 +190,16 @@ class PseudoNAM(nn.Module):
             print("SPlIT", i)
         
             # Split the data into training and validation
-            X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=self.validation_size, random_state=10+i)
-            
-            # Get pseudo values
-            pseudo_vals_train = self.get_pseudo_values(y_train, self.eval_times.cpu().numpy())
-            pseudo_vals_val = self.get_pseudo_values(y_val, self.eval_times.cpu().numpy())
+            X_train, X_val, y_train, y_val = train_test_split(X_processed, y, test_size=self.validation_size, random_state=10+i)
             
             # Fit to this split
-            model = self.fit_one_split(X_train, pseudo_vals_train, X_val, pseudo_vals_val)
+            model = self.fit_one_split(X_train, y_train, X_val, y_val)
             model.feature_names_in_ = X_train.columns   
             
             self.models.append(model)
+            
+        if fit_baseline:
+            self.fit_baseline(X, y)
             
         return
     
@@ -268,30 +209,56 @@ class PseudoNAM(nn.Module):
         X_test = self.preprocess_data(X_test)
         
         # Make placeholder y_test
-        y_test = np.zeros((X_test.shape[0], len(self.eval_times)))
+        y_test = np.zeros(X_test.shape[0], dtype=[("event", "?"), ("time", "f8")])
         
         test_loader = self.get_data_loader(X_test, y_test, shuffle=False)
         
-        test_preds = np.zeros((self.n_val_splits, X_test.shape[0], len(self.eval_times)))
+        test_preds = np.zeros((self.n_val_splits, X_test.shape[0]))
         for i, model in enumerate(self.models):
             _, model_preds = self.test_epoch_mains(model, test_loader)
             test_preds[i, ...] = model_preds.cpu().numpy()
             
         return np.mean(test_preds, axis=0)
     
+    def fit_baseline(self, X, y):
+        
+        self.breslow = BreslowEstimator()
+        pred = self.predict(X)
+        self.breslow.fit(pred, y["event"], y["time"])
+        
+        return
+    
+    def predict_survival(self, X, eval_times):
+        
+        if not hasattr(self, 'breslow'):
+            raise ValueError("Must fit baseline model first.")
+        
+        pred = self.predict(X)
+        surv_fns = self.breslow.get_survival_function(pred)
+        return np.array([fn(eval_times) for fn in surv_fns])
+
+    
     def get_shape_function(self, feature_name, X, eval_time, feat_min=None, feat_max=None):
         
         # placeholder y
-        y = np.zeros(X.shape[0])
+        y = np.zeros(X.shape[0], dtype=[("event", "?"), ("time", "f8")])
         
         X = self.preprocess_data(X)
         
         dfs = []
         for i, model in enumerate(self.models):
             
+            print("SPLIT", i)
+            print("X shape", X.shape)
+            
             X_train, _, y_train, _ = train_test_split(X, y, test_size=self.validation_size, random_state=10+i)
             
+            print("X_train shape", X_train.shape)
+            
             train_loader = self.get_data_loader(X_train, y_train, shuffle=False)
+            print("TRAIN LOADER", next(iter(train_loader))[0].shape)
+            
+            
             model.compute_intercept(train_loader)
             
             feat_index = model.feature_names_in_.get_loc(feature_name)
@@ -306,19 +273,16 @@ class PseudoNAM(nn.Module):
                 feat_std = scaler.scale_[feat_index_in_scaler]
                 input_min = (feat_min - feat_mean) / feat_std
                 input_max = (feat_max - feat_mean) / feat_std
-                
+            
             feat_shape, feat_inputs = model.get_shape_function(feat_index, input_min, input_max, center=True)
             
             if feat_min is not None:
                 feat_inputs = feat_inputs * feat_std + feat_mean
             
-            eval_time_index = np.searchsorted(self.eval_times.cpu().numpy(), eval_time)
-            feat_shape = feat_shape.cpu().numpy()[:, eval_time_index]
-            
             dfs.append(
                 pd.DataFrame({
                     "feature": feature_name,
-                    "shape": feat_shape,
+                    "shape": feat_shape.squeeze().cpu().numpy(),
                     "input": feat_inputs.cpu().numpy().round(3),
                     "split": i
                 })
@@ -329,9 +293,8 @@ class PseudoNAM(nn.Module):
     def get_calibration_data(self, X, y, eval_time, n_bins=20, method="quantile"):
         
         # First get cdf preds
-        cdf_preds = 1 / (1 + np.exp(-1 * self.predict(X)))
-        eval_index = np.searchsorted(self.eval_times.cpu().numpy(), eval_time)
-        cdf_preds = cdf_preds[:, eval_index]
+        surv_preds = self.predict_survival(X, eval_time)
+        cdf_preds = 1 - surv_preds
         
         
         if method == "quantile":

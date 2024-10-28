@@ -1,0 +1,4 @@
+div.sphinxsidebarwrapper .toctree-l1 a,
+div.sphinxsidebarwrapper .toctree-l2 a {
+    font-size: 100%; /* Adjust this percentage to match the module size */
+}

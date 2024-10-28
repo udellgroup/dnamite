@@ -1,4 +1,8 @@
-from loss_fns import ipcw_rps_loss
+"""
+SAMPLE BEGINNING OF FILE DOCSTRING
+"""
+
+from dnamite.loss_fns import ipcw_rps_loss
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -435,8 +439,8 @@ class BaseSingleSplitNAM(nn.Module):
         grid_feat1, grid_feat2 = torch.meshgrid(inputs_feat1, inputs_feat2, indexing='ij')
 
         # Reshape the grids to 1D tensors to get pairwise combinations
-        pairs_x = grid_feat1.reshape(-1)
-        pairs_y = grid_feat2.reshape(-1)
+        grid_feat1.reshape(-1)
+        grid_feat2.reshape(-1)
         
         inputs = torch.stack([grid_feat1.reshape(-1), grid_feat2.reshape(-1)], dim=1).to(self.device)
         
@@ -526,7 +530,7 @@ class BaseSingleSplitNAM(nn.Module):
         best_test_loss = float('inf')
 
         for epoch in range(n_epochs):
-            train_loss = train_epoch_fn(self, train_loader, optimizer)
+            train_epoch_fn(self, train_loader, optimizer)
             test_loss, test_preds = test_epoch_fn(self, test_loader)
             
             # print(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f}")
@@ -992,10 +996,13 @@ class NAMRegressor(BaseNAM):
             
         return pd.concat(dfs)
     
-# Survival analysis NAM
-# Using the same structure as DNAMite
-# but without discretization/embedding
+
 class NAMSurvival(nn.Module):
+    """
+    # Survival analysis NAM
+    # Using the same structure as DNAMite
+    # but without discretization/embedding
+    """
     
     def __init__(
         self, 

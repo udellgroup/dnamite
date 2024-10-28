@@ -1,5 +1,5 @@
 import torch
-from torch import nn
+
 
 def ipcw_rps_loss(
     cdf_preds, 
@@ -9,6 +9,9 @@ def ipcw_rps_loss(
     times, 
     eval_times
 ):
+    """  
+    IPCW Loss
+    """
     
     # cdf_preds is of shape (N, T) where N is batch size and T is len(eval_times)
     #     cdf_preds[i, j] is hat(P)(Ti <= tj | Xi)
@@ -43,6 +46,9 @@ def ipcw_rps_loss(
     return torch.mean(loss)
 
 def rps_loss(surv_preds, events, times, eval_times):
+    """  
+    RPS Loss
+    """
     
     # surv_preds is of shape (N, T)
     # where N is batch size and T is number of evaluation times
@@ -59,11 +65,18 @@ def pseudo_value_loss(
     surv_preds,
     pseudo_values
 ):
+    """  
+    pseudo-value loss
+    """
+    
     return torch.mean(
         pseudo_values * (1 - 2*surv_preds) + torch.square(surv_preds), dim=0
     ).sum()
     
 def coxph_loss(y_hat, events, times):
+    """
+    CoxPH Loss
+    """
     
     # Sort y_hat and events by times
     sort_idx = torch.argsort(times)
@@ -77,6 +90,9 @@ def coxph_loss(y_hat, events, times):
     return -1 * events.to(torch.float32) @ (y_hat - torch.log(e_sums))
 
 def bce_surv_loss(surv_preds, events, times, eval_times):
+    """
+    Binary Cross-Entropy Survival Loss
+    """
     
     # surv_preds is of shape (N, T)
     # where N is batch size and T is number of evaluation times
@@ -102,6 +118,9 @@ def bce_surv_loss(surv_preds, events, times, eval_times):
     return torch.mean(loss)
 
 def drsa_loss(hazard_preds, events, times, eval_times):
+    """
+    DRSA-Loss
+    """
     
     # Find evaluation time for each event time
     sample_eval_times = torch.clip(
