@@ -42,7 +42,57 @@ from dnamite.loss_fns import ipcw_rps_loss
 # kernel_weight: weight for kernel smoothing
 # pair_kernel_size: window size for kernel smoothing for pairs
 # pair_kernel_weight: weight for kernel smoothing for pairs
-class BaseSingleSplitDNAMiteModel(nn.Module):
+class _BaseSingleSplitDNAMiteModel(nn.Module):
+    """
+    _BaseSingleSplitDNAMiteModel is a private base class for DNAMite models trained on a single train/val split.
+
+    Parameters
+    ----------
+    n_features : int
+        The number of input features.
+    n_output : int
+        The number of output features.
+    feature_sizes : list of int
+        The sizes of the features.
+    n_embed : int, optional (default=32)
+        The size of the embedding layer.
+    n_hidden : int, optional (default=32)
+        The number of hidden units in the hidden layers.
+    n_layers : int, optional (default=2)
+        The number of hidden layers.
+    gamma : float, optional (default=1)
+        The gamma parameter use in the smooth-step function. 
+    reg_param : float, optional (default=0)
+        The regularization parameter for feature selection.
+        Setting to 0 indicates no feature selection. 
+        Larger values indicate stronger feature selection, i.e. less features.
+    pair_reg_param : float, optional (default=0)
+        The regularization parameter for pairs.
+        Setting to 0 indicates no pair selection.
+        Larger values indicate stronger pair selection, i.e. less pairs.
+    entropy_param : float, optional (default=0)
+        The entropy parameter for feature selection.
+        Setting to 0 indicates no entropy regularization.
+        Larger values indicate stronger entropy regularization.
+    fit_pairs : bool, optional (default=True)
+        Whether to fit pairs.
+    device : str, optional (default="cpu")
+        The device to run the model on ("cpu" or "cuda").
+    pairs_list : list, optional (default=None)
+        The list of pairs for the model.
+    kernel_size : int, optional (default=5)
+        The size of the kernel for smoothing.
+    kernel_weight : float, optional (default=1)
+        The weight for kernel smoothing.
+    pair_kernel_size : int, optional (default=3)
+        The size of the kernel for smoothing pairs.
+    pair_kernel_weight : float, optional (default=1)
+        The weight for kernel smoothing for pairs.
+    save_dir : str, optional (default=None)
+        The directory to save the model.
+    cat_feat_mask : list or None, optional (default=None)
+        The mask for categorical features.
+    """
     def __init__(self, 
                  n_features, 
                  n_output,
@@ -61,7 +111,8 @@ class BaseSingleSplitDNAMiteModel(nn.Module):
                  kernel_weight=1,
                  pair_kernel_size=3,
                  pair_kernel_weight=1,
-                 save_dir=None
+                 save_dir=None,
+                 cat_feat_mask=None
                  ):
         super().__init__()
         self.n_features = n_features
@@ -84,6 +135,10 @@ class BaseSingleSplitDNAMiteModel(nn.Module):
         self.pairs_list = pairs_list
         if pairs_list is not None:
             self.selected_pair_indices = pairs_list
+        if cat_feat_mask is not None:
+            self.cat_feat_mask = cat_feat_mask.to(device)
+        else:
+            self.cat_feat_mask = torch.zeros(n_features).astype(bool).to(device)
         
         if save_dir is not None:
             self.save_dir = save_dir            
@@ -278,7 +333,7 @@ class BaseSingleSplitDNAMiteModel(nn.Module):
         
         
 
-    def forward(self, mains=None, pairs=None):
+    def forward(self, mains=None, pairs=None, on_partialed_set=False):
         # mains of shape (batch_size, n_features)
         # pairs of shape (batch_size, |n_features choose 2|, 2)
         
@@ -287,7 +342,8 @@ class BaseSingleSplitDNAMiteModel(nn.Module):
         
         if mains is not None:
             
-            mains = mains[:, self.active_feats]
+            if not on_partialed_set:
+                mains = mains[:, self.active_feats]
             
             # Add offsets to features to get the correct indices
             offsets = self.embedding_offsets.unsqueeze(0).expand(mains.size(0), -1).to(self.device)
@@ -346,7 +402,8 @@ class BaseSingleSplitDNAMiteModel(nn.Module):
         
         if pairs is not None:
             
-            pairs = pairs[:, self.active_pairs, :]
+            if not on_partialed_set:
+                pairs = pairs[:, self.active_pairs, :]
             
             # Get cat_feat_mask
             pairs_cat_feat_mask = self.cat_feat_mask[self.pairs_list[self.active_pairs]]
@@ -742,7 +799,10 @@ class BaseSingleSplitDNAMiteModel(nn.Module):
         test_loader,
         optimizer,
         n_epochs,
-        mains=True
+        mains=True,
+        verbose=False,
+        show_feat_count=False,
+        show_pair_count=False,
     ):
         
 
@@ -750,16 +810,23 @@ class BaseSingleSplitDNAMiteModel(nn.Module):
         best_test_loss = float('inf')
 
         for epoch in range(n_epochs):
-            train_epoch_fn(self, train_loader, optimizer)
-            test_loss, test_preds = test_epoch_fn(self, test_loader)
-            
-            # print(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f}")
+            train_loss = train_epoch_fn(self, train_loader, optimizer)
+            test_loss, _ = test_epoch_fn(self, test_loader)
             
             # Do feature pruning
-            if mains:
-                self.prune_parameters(mains=True, pairs=False)
-            else:
-                self.prune_parameters(mains=False, pairs=True)
+            if self.penalized:
+                if mains:
+                    self.prune_parameters(mains=True, pairs=False)
+                else:
+                    self.prune_parameters(mains=False, pairs=True)
+            
+            if verbose:
+                if show_feat_count:
+                    print(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f} | Active features: {len(self.active_feats)}")
+                elif show_pair_count:
+                    print(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f} | Active pairs: {len(self.active_pairs)}")
+                else:
+                    print(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f}")
 
             # Check if the test loss has improved
             if test_loss < best_test_loss:
@@ -783,44 +850,93 @@ class BaseSingleSplitDNAMiteModel(nn.Module):
 
         return
 
-# Parent DNAMite model
-# n_features: number of features in the data
-# n_embed: embedding dimension
-# n_hidden: hidden layer dimension
-# n_output: output dimension
-# max_bins: maximum number of bins to discretize each feature
-# validation_size: proportion of data to use for validation
-# n_val_splits: number of validation splits to average over
-# learning_rate: learning rate for the optimizer
-# max_epochs: maximum number of epochs to train for
-# batch_size: batch size for training
-# device: device to run the model on
-# **kwargs: other arguments to pass to BaseSingleSplitDNAMiteModel
 class BaseDNAMiteModel(nn.Module):
+    """
+    BaseDNAMiteModel is the parent class for DNAMite models.
+
+    This class provides the foundational architecture for DNAMite models, including embedding layers, hidden layers, and output layers. It also manages training and validation processes.
+
+    Parameters
+    ----------
+    n_features : int
+        Number of input features in the data.
+    n_output : int
+        Number of output features.
+    n_embed : int, default=32
+        Dimensionality of the embedding layer.
+    n_hidden : int, default=32
+        Dimension of each hidden layer.
+    n_layers : int, default=2
+        Number of hidden layers in the model.
+    max_bins : int, default=32
+        Maximum number of bins for feature discretization.
+    validation_size : float, default=0.2
+        Proportion of data to use for validation.
+    n_val_splits : int, default=5
+        Number of validation splits to average over.
+    learning_rate : float, default=1e-4
+        Learning rate for the optimizer.
+    max_epochs : int, default=100
+        Maximum number of training epochs.
+    batch_size : int, default=128
+        Batch size for training.
+    device : str, default="cpu"
+        Device for model computation, either "cpu" or "cuda".
+    fit_pairs : bool, default=True
+        Flag indicating whether to fit pairwise interactions between features.
+    pairs_list : list of tuple[int, int], optional
+        List of feature pairs to consider for interactions; if None, no specific pairs are used.
+    gamma : float, default=1
+        Regularization or scaling parameter; purpose depends on specific use in the model.
+    reg_param : float, default=0
+        Regularization parameter for feature-level regularization.
+    pair_reg_param : float, default=0
+        Regularization parameter for feature pairs.
+    entropy_param : float, default=0
+        Entropy parameter to control the diversity or uncertainty.
+    kernel_size : int, default=5
+        Size of the kernel used in smoothing for single features.
+    kernel_weight : float, default=1
+        Weight applied to the smoothing kernel for single features.
+    pair_kernel_size : int, default=3
+        Kernel size for smoothing pairwise feature interactions.
+    pair_kernel_weight : float, default=1
+        Weight applied to the smoothing kernel for feature pairs.
+    save_dir : str, optional
+        Directory path to save model outputs and checkpoints; if None, no saving occurs.
+    """
     
-    def __init__(
-        self, 
-        n_features, 
-        n_output, 
-        n_embed=32,
-        n_hidden=32, 
-        max_bins=32,
-        validation_size=0.2,
-        n_val_splits=5,
-        learning_rate=1e-4,
-        max_epochs=100,
-        batch_size=128,
-        device="cpu",
-        fit_pairs=True,
-        reg_param=0,
-        entropy_param=0,
-        **kwargs
+    def __init__(self, 
+                 n_features, 
+                 n_output, 
+                 n_embed=32, 
+                 n_hidden=32,
+                 n_layers=2, 
+                 max_bins=32, 
+                 validation_size=0.2, 
+                 n_val_splits=5, 
+                 learning_rate=1e-4, 
+                 max_epochs=100, 
+                 batch_size=128, 
+                 device="cpu", 
+                 fit_pairs=True,
+                 pairs_list=None,
+                 gamma=1,
+                 reg_param=0, 
+                 pair_reg_param=0, 
+                 entropy_param=0, 
+                 kernel_size=5, 
+                 kernel_weight=1, 
+                 pair_kernel_size=3, 
+                 pair_kernel_weight=1, 
+                 save_dir=None
     ):
         super().__init__()
         self.n_features = n_features
         self.n_embed = n_embed
         self.n_hidden = n_hidden
         self.n_output = n_output
+        self.n_layers = n_layers
         self.max_bins = max_bins
         self.validation_size = validation_size
         self.n_val_splits = n_val_splits
@@ -829,30 +945,37 @@ class BaseDNAMiteModel(nn.Module):
         self.batch_size = batch_size
         self.device = device
         self.fit_pairs = fit_pairs
+        self.pairs_list = pairs_list
+        self.gamma = gamma
         self.reg_param = reg_param
+        self.pair_reg_param = pair_reg_param
         self.entropy_param = entropy_param
-        
-        self.model_args = kwargs
+        self.kernel_size = kernel_size
+        self.kernel_weight = kernel_weight
+        self.pair_kernel_size = pair_kernel_size
+        self.pair_kernel_weight = pair_kernel_weight
+        self.save_dir = save_dir
     
-    def infer_data_types(self, X):
+    def _infer_data_types(self, X):
         
         self.feature_dtypes = []
         for i in range(X.shape[1]):
-            if X.iloc[:, i].dtype.name == 'category' or \
-                X.iloc[:, i].dtype.name == 'object' or \
-                X.iloc[:, i].nunique() <= 2:
-
+            if set(X.iloc[:, i].unique()).issubset({0, 1}):
+                self.feature_dtypes.append('binary')
+            elif X.iloc[:, i].dtype.name == 'category' or \
+                X.iloc[:, i].dtype.name == 'object':
                 self.feature_dtypes.append('categorical')
             else:
                 self.feature_dtypes.append('continuous')
                 
-        self.cat_feat_mask = np.array(self.feature_dtypes) == 'categorical'
+        self.cat_feat_mask = np.array(self.feature_dtypes) != 'continuous'
+        self.cat_feat_mask = torch.tensor(self.cat_feat_mask).to(self.device)
     
-    def discretize_data(self, X):
+    def _discretize_data(self, X):
         X_discrete = X.copy()
         
         if not hasattr(self, 'feature_dtypes'):
-            self.infer_data_types(X_discrete)
+            self._infer_data_types(X_discrete)
         
         # If X is pandas, store column names
         if hasattr(X, 'columns'):
@@ -864,22 +987,31 @@ class BaseDNAMiteModel(nn.Module):
             for i in range(self.n_features):
                 if self.feature_dtypes[i] == 'continuous':
                     X_discrete[:, i], _ = discretize(X_discrete[:, i], max_bins=self.max_bins, bins=self.feature_bins[i])
+                elif self.feature_dtypes[i] == 'binary':
+                    ordinal_map = {val: float(j) for j, val in enumerate(self.feature_bins[i])}
+                    X_discrete[:, i] = np.vectorize(ordinal_map.get)(X_discrete[:, i].astype(float))
                 else:
-                    ordinal_map = {val: float(i) for i, val in enumerate(self.feature_bins[i])}
+                    ordinal_map = {val: float(j) for j, val in enumerate(self.feature_bins[i])}
                     X_discrete[:, i] = np.vectorize(ordinal_map.get)(X_discrete[:, i])
                 
         else:
             self.feature_bins = []
             self.feature_sizes = []
-            for i in range(self.n_features):
+            print("Discretizing features...")
+            from time import time
+            for i in tqdm(range(self.n_features)):
                 if self.feature_dtypes[i] == 'continuous':
                     X_discrete[:, i], bins = discretize(np.ascontiguousarray(X_discrete[:, i]), max_bins=self.max_bins)
+                elif self.feature_dtypes[i] == 'binary':
+                    bins = [np.nan, 0, 1]
+                    X_discrete[:, i] = np.where(
+                        np.isnan(X_discrete[:, i].astype(float)), 0, X_discrete[:, i] + 1.0
+                    )
                 else:
-                    
-                    # Ordinal encoder and force missing value to be 0
-                    ordinal_encoder = OrdinalEncoder(dtype=float, handle_unknown="use_encoded_value", unknown_value=-1)
+                    # Ordinal encoder and force missing/unknown value to be 0
+                    ordinal_encoder = OrdinalEncoder(dtype=float, handle_unknown="use_encoded_value", unknown_value=-1, encoded_missing_value=-1)
                     X_discrete[:, i] = ordinal_encoder.fit_transform(X_discrete[:, i].reshape(-1, 1)).flatten() + 1.0
-                    bins = ["NA"] + list(ordinal_encoder.categories_[0])
+                    bins = [np.nan] + list(ordinal_encoder.categories_[0])
                 
                 self.feature_bins.append(bins)
                 
@@ -891,7 +1023,7 @@ class BaseDNAMiteModel(nn.Module):
             
         return X_discrete
     
-    def compute_bin_scores(self, ignore_missing_bin_in_intercept=True):
+    def _compute_bin_scores(self, ignore_missing_bin_in_intercept=True):
         
         for model in self.models:
         
@@ -916,7 +1048,7 @@ class BaseDNAMiteModel(nn.Module):
                 
         return
     
-    def fit_one_split(self, X_train, y_train, X_val, y_val, partialed_indices=None):
+    def _fit_one_split(self, X_train, y_train, X_val, y_val, partialed_indices=None):
         
         # If selected_feats is set, only use those features
         if hasattr(self, 'selected_feats'):
@@ -928,33 +1060,47 @@ class BaseDNAMiteModel(nn.Module):
         train_loader = self.get_data_loader(X_train, y_train)
         val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
         
-        model = BaseSingleSplitDNAMiteModel(
+        model = _BaseSingleSplitDNAMiteModel(
             n_features=X_train.shape[1], 
-            n_embed=self.n_embed,
-            n_hidden=self.n_hidden, 
             n_output=self.n_output,
             feature_sizes=self.feature_sizes, 
-            device=self.device,
-            fit_pairs=self.fit_pairs,
-            reg_param=0, # only use reg/entropy during feature selection
-            entropy_param=0,
-            **self.model_args
+            n_embed=self.n_embed,
+            n_hidden=self.n_hidden, 
+            n_layers=self.n_layers,
+            fit_pairs=self.fit_pairs, 
+            device=self.device, 
+            pairs_list=self.pairs_list, 
+            kernel_size=self.kernel_size,
+            kernel_weight=self.kernel_weight,
+            pair_kernel_size=self.pair_kernel_size,
+            pair_kernel_weight=self.pair_kernel_weight,
+            save_dir=self.save_dir,
+            cat_feat_mask=self.cat_feat_mask
         ).to(self.device)
         optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
         
         if partialed_indices is not None:
             print("TRAINING PARTIALED FEATS")
             model.active_feats = torch.tensor(partialed_indices).to(self.device)
+            
+            # Get data loaders only for partialed feats
+            train_loader = self.get_data_loader(X_train.iloc[:, partialed_indices], y_train)
+            val_loader = self.get_data_loader(X_val.iloc[:, partialed_indices], y_val, shuffle=False)
+            
             model.train_(
-                self.train_epoch_mains, 
-                self.test_epoch_mains, 
+                partial(self.train_epoch_mains, on_partialed_set=True), 
+                partial(self.test_epoch_mains, on_partialed_set=True), 
                 train_loader, 
                 val_loader, 
                 optimizer, 
                 self.max_epochs,
-                mains=True
+                mains=True,
             )
             model.active_feats = torch.arange(self.n_features).to(self.device)
+            
+            # Get data loaders
+            train_loader = self.get_data_loader(X_train, y_train)
+            val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
         
         print("TRAINING MAINS")
         model.train_(
@@ -1005,6 +1151,22 @@ class BaseDNAMiteModel(nn.Module):
         return model
     
     def select_features(self, X, y, partialed_feats=None):
+        """
+        Perform feature selection. Selected features and pairs will be stored in model.selected_feats
+        and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
+        
+        Parameters:
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for the model.
+            
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The target variable.
+            
+        partialed_feats : list or None, optional
+            A list of features that should be fit completely before fitting all other features.
+        """
+
             
         if partialed_feats is not None:
             partialed_indices = [X.columns.get_loc(feat) for feat in partialed_feats]
@@ -1013,11 +1175,11 @@ class BaseDNAMiteModel(nn.Module):
         
         self.feature_names_in_ = X.columns
         
-        if hasattr(X, 'values'):
-            X = X.values
-        
         # First discretize the data
-        X_discrete = self.discretize_data(X)
+        X_discrete = self._discretize_data(X)
+        
+        if hasattr(X, 'values'):
+            X_discrete = X_discrete.values
         
         # Make one train/val split for feature selection
         X_train, X_val, y_train, y_val = train_test_split(X_discrete, y, test_size=self.validation_size)
@@ -1026,40 +1188,65 @@ class BaseDNAMiteModel(nn.Module):
         train_loader = self.get_data_loader(X_train, y_train)
         val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
         
-        model = BaseSingleSplitDNAMiteModel(
+        model = _BaseSingleSplitDNAMiteModel(
             n_features=self.n_features, 
+            n_output=self.n_output,
+            feature_sizes=self.feature_sizes, 
             n_embed=self.n_embed,
             n_hidden=self.n_hidden, 
-            n_output=self.n_output,
-            feature_sizes=self.feature_sizes,
-            device=self.device,
-            fit_pairs=self.fit_pairs,
-            reg_param=self.reg_param,
-            entropy_param=self.entropy_param,
-            **self.model_args
+            n_layers=self.n_layers,
+            gamma=self.gamma, 
+            reg_param=self.reg_param, 
+            pair_reg_param=self.pair_reg_param, 
+            entropy_param=self.entropy_param, 
+            fit_pairs=self.fit_pairs, 
+            device=self.device, 
+            pairs_list=self.pairs_list, 
+            kernel_size=self.kernel_size,
+            kernel_weight=self.kernel_weight,
+            pair_kernel_size=self.pair_kernel_size,
+            pair_kernel_weight=self.pair_kernel_weight,
+            save_dir=self.save_dir,
+            cat_feat_mask=self.cat_feat_mask
         ).to(self.device)
+
         optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
         
         if partialed_indices is not None:
+            print("TRAINING ON PARTIALED FEATS")
+            
             model.active_feats = torch.tensor(partialed_indices).to(self.device)
             reg_param = model.reg_param
             entropy_param = model.entropy_param
+            penalized = model.penalized
             model.reg_param = 0
             model.entropy_param = 0
+            model.penalized = False
+            
+            # Get data loaders only for partialed feats
+            train_loader = self.get_data_loader(X_train[:, partialed_indices], y_train)
+            val_loader = self.get_data_loader(X_val[:, partialed_indices], y_val, shuffle=False)
             
             model.train_(
-                self.train_epoch_mains, 
-                self.test_epoch_mains, 
+                partial(self.train_epoch_mains, on_partialed_set=True), 
+                partial(self.test_epoch_mains, on_partialed_set=True), 
                 train_loader, 
                 val_loader, 
                 optimizer, 
                 self.max_epochs,
-                mains=True
+                mains=True,
+                verbose=True,
+                show_feat_count=True
             )
             
-            model.active_feats = torch.arange(self.n_features).to(self.device)
+            model.active_feats = torch.arange(X.shape[1]).to(self.device)
             model.reg_param = reg_param
             model.entropy_param = entropy_param
+            model.penalized = penalized
+            
+            # Go back to full loaders
+            train_loader = self.get_data_loader(X_train, y_train)
+            val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
         
         model.train_(
             partial(self.train_epoch_mains, partialed_indices=partialed_indices), 
@@ -1068,7 +1255,9 @@ class BaseDNAMiteModel(nn.Module):
             val_loader, 
             optimizer, 
             self.max_epochs,
-            mains=True
+            mains=True,
+            verbose=True,
+            show_feat_count=True
         )
         
         print("Number of main features selected: ", len(model.active_feats))
@@ -1104,7 +1293,9 @@ class BaseDNAMiteModel(nn.Module):
             val_loader, 
             optimizer, 
             self.max_epochs,
-            mains=False
+            mains=False,
+            verbose=True,
+            show_pair_count=True
         )
         
         self.selected_feats = self.feature_names_in_[model.active_feats.cpu().numpy()].tolist()
@@ -1121,6 +1312,21 @@ class BaseDNAMiteModel(nn.Module):
         return
     
     def fit(self, X, y, partialed_feats=None):
+        """
+        Train model.
+
+        Parameters:
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for training.
+
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The target variable or labels.
+
+        partialed_feats : list or None, optional
+            A list of features that should be fit completely before fitting all other features.
+        """
+
         
         if partialed_feats is not None:
             partialed_indices = [X.columns.get_loc(feat) for feat in partialed_feats]
@@ -1130,7 +1336,7 @@ class BaseDNAMiteModel(nn.Module):
         self.feature_names_in_ = X.columns
         
         # First discretize the data
-        X_discrete = self.discretize_data(X)
+        X_discrete = self._discretize_data(X)
         
         # Fit several models, one for each validation split
         self.models = []
@@ -1141,7 +1347,7 @@ class BaseDNAMiteModel(nn.Module):
             X_train, X_val, y_train, y_val = train_test_split(X_discrete, y, test_size=self.validation_size)
             
             # Fit to this split
-            model = self.fit_one_split(X_train, y_train, X_val, y_val, partialed_indices=partialed_indices)
+            model = self._fit_one_split(X_train, y_train, X_val, y_val, partialed_indices=partialed_indices)
             model.feature_names_in_ = X_train.columns
             model.feature_bins = self.feature_bins
             
@@ -1159,13 +1365,22 @@ class BaseDNAMiteModel(nn.Module):
             
             self.models.append(model)
             
-        self.compute_bin_scores()
+        self._compute_bin_scores()
             
         return
     
     def predict(self, X_test):
+        """
+        Predict labels using the trained model.
         
-        X_test_discrete = self.discretize_data(X_test)
+        Parameters:
+        ----------
+        X_test : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for prediction.
+        
+        """
+        
+        X_test_discrete = self._discretize_data(X_test)
         
         # If selected_feats is set, only use those features
         if hasattr(self, 'selected_feats'):
@@ -1193,6 +1408,21 @@ class BaseDNAMiteModel(nn.Module):
         return np.mean(test_preds, axis=0)
     
     def get_feature_importances(self, ignore_missing_bin=False):
+        """
+        Get the feature importance scores for all features in the model.
+        
+        Parameters:
+        ----------
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing feature importances.
+            If the missing bin is ignored, then the importance is only calculated over samples where 
+            the feature is not missing. 
+            
+        Returns:
+        ----------
+        importances : pandas.DataFrame
+            A DataFrame containing the feature importance scores for each feature.
+        """
         
         importances = []
         for split, model in enumerate(self.models):
@@ -1220,6 +1450,20 @@ class BaseDNAMiteModel(nn.Module):
         return self.importances
     
     def plot_feature_importances(self, k=10, ignore_missing_bin=False):
+        """
+        Plot a bar plot with the importance score for the top k features.
+        
+        Parameters:
+        ----------
+        k : int, default=10
+            Number of features to plot.
+            
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing feature importances.
+            If the missing bin is ignored, then the importance is only calculated over samples where 
+            the feature is not missing.
+        """
+        
         plt.figure(figsize=(6, 4))
 
         feat_imps = self.get_feature_importances(ignore_missing_bin=ignore_missing_bin)
@@ -1232,6 +1476,22 @@ class BaseDNAMiteModel(nn.Module):
         plt.tight_layout()
     
     def get_shape_function(self, feature_name, is_cat_col=False):
+        """
+        Get the shape function data, i.e. the bin scores, for a given feature.
+        
+        Parameters:
+        ----------
+        feature_name : str
+            The name of the feature.
+            
+        is_cat_col : bool, default=False
+            Whether the feature is a categorical feature.
+            
+        Returns:
+        ----------
+        df : pandas.DataFrame
+            A DataFrame containing the bin scores for the feature.
+        """
         
         dfs = []
         for i, model in enumerate(self.models):
@@ -1250,11 +1510,6 @@ class BaseDNAMiteModel(nn.Module):
                 
             else:
                 
-                # replace feature bins with ordinal encoded values
-                # number of feature bins is number of unique categories + 1, and 
-                # then one additional for the missing bin (represented by -1)
-                
-                # feat_bin_values = np.arange(-1, len(model.feature_bins[col_index])+1)
                 feat_bin_values = model.feature_bins[col_index]
                 
             dfs.append(
@@ -1268,22 +1523,28 @@ class BaseDNAMiteModel(nn.Module):
             )
             
         df = pd.concat(dfs)
-        
-        # if is_cat_col:
-        #     # Replace bin values with category names
-        #     # ord_encoder = self.preprocessor.transformers_[0][1]
-        #     # feat_index = np.where(ord_encoder.feature_names_in_ == feature_name)[0][0]
-        #     # cat_feat_map = {-1: "NA"}
-        #     # for i, cat in enumerate(ord_encoder.categories_[feat_index]):
-        #     #     cat_feat_map[i] = cat
-            
-        #     cat_feat_map = {i: cat for i, cat in enumerate(model.feature_bins[col_index])}
-                
-        #     df["bin"] = df["bin"].map(cat_feat_map)
             
         return df
     
     def plot_shape_function(self, feature_names, is_cat_cols=None, plot_missing_bin=False):
+        """
+        Plot the shape function for given feature(s).
+        
+        Parameters:
+        ----------
+        feature_names : str or list of str
+            The name of the feature(s) to plot.
+            
+        is_cat_cols : bool or list of bool, default=None
+            Whether the feature(s) are categorical features.
+            If None, all features are assumed to be continuous.
+            If a single boolean is provided, all features are assumed to be of the same type.
+            If a list of booleans is provided, it should have the same length as feature_names.
+            
+        plot_missing_bin : bool, default=False
+            Whether to plot the missing bin.
+            Only applicable for continuous features.
+        """
         
         if isinstance(feature_names, str):
             feature_names = [feature_names]
@@ -1363,7 +1624,34 @@ class BaseDNAMiteModel(nn.Module):
                 
         plt.tight_layout()
         
+    def _make_grid(self, x, y):
+        grid = np.meshgrid(x, y, indexing="ij")
+        grid = np.stack(grid, axis=-1)
+        return grid.reshape(-1, 2)
+        
     def get_pair_shape_function(self, feat1_name, feat2_name, is_feat1_cat_col=False, is_feat2_cat_col=False):
+        """
+        Get the shape function data for an interaction affect.
+        
+        Parameters:
+        ----------
+        feat1_name : str
+            The name of the first feature in the pair/interaction.
+        
+        feat2_name : str
+            The name of the second feature in the pair/interaction.
+            
+        is_feat1_cat_col : bool, default=False
+            Whether the first feature is a categorical feature.
+            
+        is_feat2_cat_col : bool, default=False
+            Whether the second feature is a categorical feature.
+        
+        Returns:
+        ----------
+        pair_data_dnamite : pandas.DataFrame
+            A DataFrame containing the shape function data for the interaction effect.
+        """
         
         bin_scores = []
         bin_values = []
@@ -1386,7 +1674,7 @@ class BaseDNAMiteModel(nn.Module):
             feat1_nbins = len(model.feature_bins[col1_index])
             feat2_nbins = len(model.feature_bins[col2_index])
             
-            grid = self.make_grid(np.arange(0, feat1_nbins+2), np.arange(0, feat2_nbins+2))
+            grid = self._make_grid(np.arange(0, feat1_nbins+2), np.arange(0, feat2_nbins+2))
             
             if is_feat1_cat_col and not is_feat2_cat_col:
                 pair_bin_scores = pair_bin_scores[grid[:, 0] > 0]
@@ -1417,19 +1705,10 @@ class BaseDNAMiteModel(nn.Module):
             bin_scores.append(pair_bin_scores)
             bin_values.append(pair_bin_values)
                 
-        return bin_scores, bin_values
-    
-    def make_grid(self, x, y):
-        grid = np.meshgrid(x, y, indexing="ij")
-        grid = np.stack(grid, axis=-1)
-        return grid.reshape(-1, 2)
-    
-    def plot_pair_shape_function(self, feat1_name, feat2_name, is_feat1_cat_col=False, is_feat2_cat_col=False):
-        plt.figure(figsize=(4, 4))
-        pair_scores, pair_values = self.get_pair_shape_function(feat1_name, feat2_name, is_feat1_cat_col=is_feat1_cat_col, is_feat2_cat_col=is_feat2_cat_col)
+        # return bin_scores, bin_values
         
-        pair_scores = np.mean(np.stack(pair_scores), axis=0)
-        pair_values = pair_values[0]
+        pair_scores = np.mean(np.stack(bin_scores), axis=0)
+        pair_values = bin_values[0]
 
         pair_data_dnamite = pd.DataFrame({
             feat1_name: pair_values[:, 0],
@@ -1447,6 +1726,32 @@ class BaseDNAMiteModel(nn.Module):
         # Round the index and columns to 3 decimal places and reassign
         pair_data_dnamite.index = pair_data_dnamite.index.to_series().round(3)
         pair_data_dnamite.columns = pair_data_dnamite.columns.to_series().round(3)
+        
+        return pair_data_dnamite
+    
+    def plot_pair_shape_function(self, feat1_name, feat2_name, is_feat1_cat_col=False, is_feat2_cat_col=False):
+        """
+        Plot a heatmap for an interaction shape function.
+        
+        Parameters:
+        ----------
+        feat1_name : str
+            The name of the first feature in the pair/interaction.
+            
+        feat2_name : str
+            The name of the second feature in the pair/interaction.
+            
+        is_feat1_cat_col : bool, default=False
+            Whether the first feature is a categorical feature.
+            
+        is_feat2_cat_col : bool, default=False
+            Whether the second feature is a categorical feature.
+        
+        """
+        
+        plt.figure(figsize=(4, 4))
+        
+        pair_data_dnamite = self.get_pair_shape_function(feat1_name, feat2_name, is_feat1_cat_col=is_feat1_cat_col, is_feat2_cat_col=is_feat2_cat_col)
 
         sns.heatmap(pair_data_dnamite)
         
@@ -1465,22 +1770,38 @@ class DNAMiteRegressor(BaseDNAMiteModel):
     max_epochs: maximum number of epochs to train for
     batch_size: batch size for training
     device: device to run the model on
-    **kwargs: other arguments to pass to BaseSingleSplitDNAMiteModel
+    fit_pairs: whether to fit pairs of features
+    reg_param: regularization parameter
+    pair_reg_param: regularization parameter for pairs
+    entropy_param: parameter for entropy loss
+    kernel_size: size of the kernel for single features
+    kernel_weight: weight of the kernel for single features
+    pair_kernel_size: size of the kernel for pairs of features
+    pair_kernel_weight: weight of the kernel for pairs
+    save_dir: directory to save the model
+    **kwargs: other arguments to pass to BaseDNAMiteModel
     """
     
-    def __init__(
-        self, 
-        n_features, 
-        n_embed=32,
-        n_hidden=32, 
-        max_bins=32,
-        validation_size=0.2,
-        n_val_splits=5,
-        learning_rate=1e-4,
-        max_epochs=100,
-        batch_size=128,
-        device="cpu",
-        **kwargs
+    def __init__(self,
+                 n_features, 
+                 n_embed=32, 
+                 n_hidden=32, 
+                 max_bins=32, 
+                 validation_size=0.2, 
+                 n_val_splits=5, 
+                 learning_rate=5e-4, 
+                 max_epochs=100, 
+                 batch_size=128, 
+                 device="cpu", 
+                 fit_pairs=True, 
+                 reg_param=0, 
+                 pair_reg_param=0, 
+                 entropy_param=0, 
+                 kernel_size=5, 
+                 kernel_weight=1, 
+                 pair_kernel_size=3, 
+                 pair_kernel_weight=1, 
+                 save_dir=None,
     ):
         super().__init__(
             n_features=n_features,
@@ -1494,8 +1815,17 @@ class DNAMiteRegressor(BaseDNAMiteModel):
             max_epochs=max_epochs,
             batch_size=batch_size,
             device=device,
-            **kwargs    
+            fit_pairs=fit_pairs,
+            reg_param=reg_param,
+            pair_reg_param=pair_reg_param,
+            entropy_param=entropy_param,
+            kernel_size=kernel_size,
+            kernel_weight=kernel_weight,
+            pair_kernel_size=pair_kernel_size,
+            pair_kernel_weight=pair_kernel_weight,
+            save_dir=save_dir, 
         )
+
             
         
     def get_data_loader(self, X, y, pairs=None, shuffle=True):
@@ -1524,7 +1854,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         
         return loader
     
-    def train_epoch_mains(self, model, train_loader, optimizer, partialed_indices=None):
+    def train_epoch_mains(self, model, train_loader, optimizer, partialed_indices=None, on_partialed_set=False):
         model.train()
         total_loss = 0
         
@@ -1543,7 +1873,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
                     # Reset active_feats
                     model.active_feats = torch.tensor([i for i in active_feats if i not in partialed_indices]).to(self.device)
 
-            y_pred = model(mains=X_main).squeeze(-1)
+            y_pred = model(mains=X_main, on_partialed_set=on_partialed_set).squeeze(-1)
             y_pred += y_pred_init
             
             loss = F.mse_loss(y_pred, labels)
@@ -1559,7 +1889,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
             
         return total_loss / len(train_loader)
     
-    def test_epoch_mains(self, model, test_loader):
+    def test_epoch_mains(self, model, test_loader, on_partialed_set=False):
         model.eval()
         total_loss = 0
         preds = []
@@ -1569,7 +1899,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
 
                 X_main, labels = X_main.to(self.device), labels.to(self.device)
 
-                y_pred = model(mains=X_main).squeeze(-1)
+                y_pred = model(mains=X_main, on_partialed_set=on_partialed_set).squeeze(-1)
         
                 preds.append(y_pred.detach())
             
@@ -1649,7 +1979,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
     # max_epochs: maximum number of epochs to train for
     # batch_size: batch size for training
     # device: device to run the model on
-    # **kwargs: other arguments to pass to BaseSingleSplitDNAMiteModel
+    # **kwargs: other arguments to pass to _BaseSingleSplitDNAMiteModel
     """
     
     
@@ -1709,7 +2039,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         
         return loader
     
-    def train_epoch_mains(self, model, train_loader, optimizer, partialed_indices=None):
+    def train_epoch_mains(self, model, train_loader, optimizer, partialed_indices=None, on_partialed_set=False):
         model.train()
         total_loss = 0
         
@@ -1728,7 +2058,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
                     # Reset active_feats
                     model.active_feats = torch.tensor([i for i in active_feats if i not in partialed_indices]).to(self.device)
 
-            y_pred = model(mains=X_main).squeeze(-1)
+            y_pred = model(mains=X_main, on_partialed_set=on_partialed_set).squeeze(-1)
             y_pred += y_pred_init
             
             loss = F.binary_cross_entropy_with_logits(y_pred, labels)
@@ -1744,7 +2074,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             
         return total_loss / len(train_loader)
     
-    def test_epoch_mains(self, model, test_loader, partialed_indices=None):
+    def test_epoch_mains(self, model, test_loader, partialed_indices=None, on_partialed_set=False):
         model.eval()
         total_loss = 0
         preds = []
@@ -1754,7 +2084,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
 
                 X_main, labels = X_main.to(self.device), labels.to(self.device)
 
-                y_pred = model(mains=X_main).squeeze(-1)
+                y_pred = model(mains=X_main, on_partialed_set=on_partialed_set).squeeze(-1)
         
                 preds.append(y_pred.detach())
             
@@ -1836,7 +2166,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
     # max_epochs: maximum number of epochs to train for
     # batch_size: batch size for training
     # device: device to run the model on
-    # **kwargs: other arguments to pass to BaseSingleSplitDNAMiteModel
+    # **kwargs: other arguments to pass to _BaseSingleSplitDNAMiteModel
     """
     
     def __init__(
@@ -1896,7 +2226,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         
         return loader
     
-    def train_epoch_mains(self, model, train_loader, optimizer, partialed_indices=None):
+    def train_epoch_mains(self, model, train_loader, optimizer, partialed_indices=None, on_partialed_set=False):
         model.train()
         total_loss = 0
         
@@ -1915,7 +2245,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
                     # Reset active_feats
                     model.active_feats = torch.tensor([i for i in active_feats if i not in partialed_indices]).to(self.device)
 
-            y_pred = model(mains=X_main).squeeze(-1)
+            y_pred = model(mains=X_main, on_partialed_set=on_partialed_set).squeeze(-1)
             y_pred += y_pred_init
             
             loss = F.cross_entropy(y_pred, labels)
@@ -1931,7 +2261,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             
         return total_loss / len(train_loader)
     
-    def test_epoch_mains(self, model, test_loader):
+    def test_epoch_mains(self, model, test_loader, on_partialed_set=False):
         model.eval()
         total_loss = 0
         preds = []
@@ -1941,7 +2271,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
 
                 X_main, labels = X_main.to(self.device), labels.to(self.device)
 
-                y_pred = model(mains=X_main).squeeze(-1)
+                y_pred = model(mains=X_main, on_partialed_set=on_partialed_set).squeeze(-1)
         
                 preds.append(y_pred.detach())
             
@@ -2079,21 +2409,35 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
 
 class DNAMiteSurvival(BaseDNAMiteModel):
     """
-    # DNAMite model for survival analysis
-    # Outputs predictions P(T <= t | X) for a set number of eval times t
-    # Uses the IPCW / Brier Loss for classification prediction
-    # n_features: number of features in the data
-    # n_embed: embedding dimension
-    # n_hidden: hidden layer dimension
-    # n_output: number of outputs, i.e. the number of eval times
-    # max_bins: maximum number of bins to discretize each feature
-    # validation_size: proportion of data to use for validation
-    # n_val_splits: number of validation splits to average over
-    # learning_rate: learning rate for the optimizer
-    # max_epochs: maximum number of epochs to train for
-    # batch_size: batch size for training
-    # device: device to run the model on
-    # **kwargs: other arguments to pass to BaseSingleSplitDNAMiteModel
+    DNAMiteSurvival is a model for survival analysis using DNAMite architecture.
+
+    Parameters
+    ----------
+    n_features : int
+        The number of input features.
+    n_eval_times : int, optional (default=100)
+        The number of evaluation times for survival analysis.
+    n_embed : int, optional (default=32)
+        The size of the embedding layer.
+    n_hidden : int, optional (default=32)
+        The number of hidden units in the hidden layers.
+    max_bins : int, optional (default=32)
+        The maximum number of bins for discretizing continuous features.
+    validation_size : float, optional (default=0.2)
+        The proportion of the dataset to include in the validation split.
+    n_val_splits : int, optional (default=5)
+        The number of validation splits for cross-validation.
+    learning_rate : float, optional (default=5e-4)
+        The learning rate for the optimizer.
+    max_epochs : int, optional (default=100)
+        The maximum number of epochs for training.
+    batch_size : int, optional (default=128)
+        The batch size for training.
+    device : str, optional (default="cpu")
+        The device to run the model on ("cpu" or "cuda").
+    **kwargs : dict
+        Additional keyword arguments for the base class.
+        
     """
     
     def __init__(
@@ -2102,20 +2446,32 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         n_eval_times=100,
         n_embed=32,
         n_hidden=32, 
-        max_bins=32,
-        validation_size=0.2,
-        n_val_splits=5,
-        learning_rate=1e-4,
-        max_epochs=100,
-        batch_size=128,
-        device="cpu",
-        **kwargs
+        n_layers=2,
+        max_bins=32, 
+        validation_size=0.2, 
+        n_val_splits=5, 
+        learning_rate=5e-4, 
+        max_epochs=100, 
+        batch_size=128, 
+        device="cpu", 
+        fit_pairs=True,
+        pairs_list=None, 
+        gamma=1,
+        reg_param=0, 
+        pair_reg_param=0, 
+        entropy_param=0, 
+        kernel_size=5, 
+        kernel_weight=1, 
+        pair_kernel_size=3, 
+        pair_kernel_weight=1, 
+        save_dir=None,
     ):
         super().__init__(
             n_features=n_features,
             n_embed=n_embed,
             n_hidden=n_hidden,
             n_output=n_eval_times,
+            n_layers=n_layers,
             max_bins=max_bins,
             validation_size=validation_size,
             n_val_splits=n_val_splits,
@@ -2123,7 +2479,17 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             max_epochs=max_epochs,
             batch_size=batch_size,
             device=device,
-            **kwargs    
+            fit_pairs=fit_pairs,
+            pairs_list=pairs_list,
+            gamma=gamma,
+            reg_param=reg_param,
+            pair_reg_param=pair_reg_param,
+            entropy_param=entropy_param,
+            kernel_size=kernel_size,
+            kernel_weight=kernel_weight,
+            pair_kernel_size=pair_kernel_size,
+            pair_kernel_weight=pair_kernel_weight,
+            save_dir=save_dir,
         )
             
         
@@ -2160,7 +2526,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
         return loader
     
-    def train_epoch_mains(self, model, train_loader, optimizer, partialed_indices=None):
+    def train_epoch_mains(self, model, train_loader, optimizer, partialed_indices=None, on_partialed_set=False):
         model.train()
         total_loss = 0
         
@@ -2179,7 +2545,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                     # Reset active_feats
                     model.active_feats = torch.tensor([i for i in active_feats if i not in partialed_indices]).to(self.device)
 
-            y_pred = model(mains=X_main)
+            y_pred = model(mains=X_main, on_partialed_set=on_partialed_set)
             y_pred += y_pred_init
             
             cdf_preds = torch.sigmoid(y_pred)
@@ -2203,9 +2569,10 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             total_loss += loss.item()
             
         model.active_feats = active_feats
+        
         return total_loss / len(train_loader)
     
-    def test_epoch_mains(self, model, test_loader):
+    def test_epoch_mains(self, model, test_loader, on_partialed_set=False):
         model.eval()
         total_loss = 0
         preds = []
@@ -2218,7 +2585,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
 
                 X_main, events, times, pcw_obs_times = X_main.to(self.device), events.to(self.device), times.to(self.device), pcw_obs_times.to(self.device)
 
-                y_pred = model(mains=X_main)
+                y_pred = model(mains=X_main, on_partialed_set=on_partialed_set)
                 y_pred += y_pred_init
         
                 preds.append(y_pred.detach())
@@ -2451,18 +2818,6 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             )
             
         df = pd.concat(dfs)
-        
-        # if is_cat_col:
-        #     # Replace bin values with category names
-        #     # ord_encoder = self.preprocessor.transformers_[0][1]
-        #     # feat_index = np.where(ord_encoder.feature_names_in_ == feature_name)[0][0]
-        #     # cat_feat_map = {-1: "NA"}
-        #     # for i, cat in enumerate(ord_encoder.categories_[feat_index]):
-        #     #     cat_feat_map[i] = cat
-            
-        #     cat_feat_map = {i: cat for i, cat in enumerate(model.feature_bins[col_index])}
-                
-        #     df["bin"] = df["bin"].map(cat_feat_map)
             
         return df
     
@@ -2612,7 +2967,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
         # self.selected_pair_indices = list(combinations(range(self.n_features), 2))
         
-        X_test_discrete = self.discretize_data(X_test)
+        X_test_discrete = self._discretize_data(X_test)
         
         # Make placeholder y_test
         if y_test is None:
@@ -2629,7 +2984,27 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
         return np.mean(test_preds, axis=0)
     
-    def get_calibration_data(self, X, y, eval_time, n_bins=20, method="quantile"):
+    def make_calibration_plot(self, X, y, eval_time, n_bins=10, binning_method="quantile"):
+        """
+        Make a calibration plot to assess the calibration of the model at a given evaluation time.
+        
+        Parameters
+        ----------
+        X : array-like
+            Input data used to generate prediction. Should usually be a held-out test set.
+            
+        y : structures np.array with dtype [("event", bool), ("time", float)]
+            Survival labels for corresponding to X.
+            
+        eval_time : float
+            Evaluation time to assess calibration at.
+            
+        n_bins : int, optional (default=10)
+            Number of bins to use for binned Kaplan-Meier estimate.
+            
+        binning_method : str, optional (default="quantile")
+            Method for binning predictions. Options are "quantile" or "uniform".
+        """
         
         # First get cdf preds
         cdf_preds = 1 / (1 + np.exp(-1 * self.predict(X)))
@@ -2637,13 +3012,13 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         cdf_preds = cdf_preds[:, eval_index]
         
         
-        if method == "quantile":
+        if binning_method == "quantile":
             # Get bins from quantiles of predictions
             quantiles = np.quantile(
                 cdf_preds,
                 np.linspace(0, 1, n_bins+2)
             )
-        elif method == "uniform":
+        elif binning_method == "uniform":
             # Get bins from uniform spacing
             quantiles = np.linspace(cdf_preds.min(), cdf_preds.max(), n_bins+2)
         else:
@@ -2678,8 +3053,6 @@ class DNAMiteSurvival(BaseDNAMiteModel):
 
             
             times, surv_prob = kaplan_meier_estimator(bin_y["event"], bin_y["time"])
-            # print("BIN", bin_, "MEAN", bin_data.mean(), "MEDIAN", np.median(bin_data))
-            # predicted.append(bin_data.mean())
             predicted.append(np.mean(bin_data))
             observed.append(
                 1 - surv_prob[np.clip(
@@ -2689,33 +3062,3 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
             
         return np.array(predicted), np.array(observed), quantiles
-    
-    def get_feature_importances(self, eval_time, ignore_missing_bin=False):
-        
-        eval_index = np.searchsorted(self.eval_times.cpu().numpy(), eval_time)
-        
-        importances = []
-        for i, model in enumerate(self.models):
-            
-            model.compute_intercept(model.bin_counts, ignore_missing_bin=ignore_missing_bin)
-            
-            pairs_list = model.pairs_list.cpu().numpy()
-            model.compute_pairs_intercept(model.pair_bin_counts)
-            
-            for j, col in enumerate(model.feature_names_in_):
-                feat_bin_scores = model.bin_scores[j][:, eval_index]
-                
-                feat_importance = np.sum(np.abs(feat_bin_scores) * np.array(model.bin_counts[j])) / np.sum(model.bin_counts[j])
-                    
-                importances.append([i, col, feat_importance, len(feat_bin_scores)])
-                
-            for j, pair in enumerate(pairs_list):
-                pair_bin_scores = model.pair_bin_scores[j][:, eval_index]
-                
-                pair_importance = np.sum(np.abs(pair_bin_scores) * np.array(model.pair_bin_counts[j])) / np.sum(model.pair_bin_counts[j])
-                    
-                importances.append([i, f"{model.feature_names_in_[pair[0]]} || {model.feature_names_in_[pair[1]]}", pair_importance, len(pair_bin_scores)])
-            
-        self.importances = pd.DataFrame(importances, columns=["split", "feature", "importance", "n_bins"])
-        return self.importances
-    
