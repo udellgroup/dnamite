@@ -132,9 +132,16 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
         self.kernel_weight = kernel_weight
         self.pair_kernel_size = pair_kernel_size
         self.pair_kernel_weight = pair_kernel_weight
-        self.pairs_list = pairs_list
+        self.pairs_list = torch.LongTensor(pairs_list).to(device)
         if pairs_list is not None:
             self.selected_pair_indices = pairs_list
+            self.n_pairs = len(pairs_list)
+        else:
+            self.selected_pair_indices = list(combinations(range(n_features), 2))
+            self.n_pairs = len(self.selected_pair_indices)
+            
+        self.init_pairs_params(self.n_pairs)
+            
         if cat_feat_mask is not None:
             self.cat_feat_mask = cat_feat_mask.to(device)
         else:
@@ -235,6 +242,8 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
         ] + [nn.Identity()]
 
         self.z_pairs = nn.Parameter(torch.empty(self.n_pairs))
+        
+        self.active_pairs = torch.arange(self.n_pairs).to(self.device)
         
         self.reset_pairs_parameters()
         
@@ -1118,18 +1127,18 @@ class BaseDNAMiteModel(nn.Module):
         if not self.fit_pairs:
             return model
 
-        if not hasattr(self, 'selected_pair_indices'):
-            self.selected_pair_indices = list(combinations(range(X_train.shape[1]), 2))
+        if self.pairs_list is None:
+            self.pairs_list = list(combinations(range(X_train.shape[1]), 2))
         
         model.freeze_main_effects()
-        model.pairs_list = torch.LongTensor(self.selected_pair_indices).to(self.device)
-        model.n_pairs = len(self.selected_pair_indices)
-        model.init_pairs_params(model.n_pairs)
-        model.active_pairs = torch.arange(model.n_pairs).to(self.device)
-        model.to(self.device)
+        # model.pairs_list = torch.LongTensor(self.selected_pair_indices).to(self.device)
+        # model.n_pairs = len(self.selected_pair_indices)
+        # model.init_pairs_params(model.n_pairs)
+        # model.active_pairs = torch.arange(model.n_pairs).to(self.device)
+        # model.to(self.device)
         
-        X_train_interactions = X_train.values[:, self.selected_pair_indices]
-        X_val_interactions = X_val.values[:, self.selected_pair_indices]
+        X_train_interactions = X_train.values[:, self.pairs_list]
+        X_val_interactions = X_val.values[:, self.pairs_list]
         
         train_loader = self.get_data_loader(X_train, y_train, pairs=X_train_interactions)
         val_loader = self.get_data_loader(X_val, y_val, pairs=X_val_interactions, shuffle=False)
@@ -1201,9 +1210,7 @@ class BaseDNAMiteModel(nn.Module):
             reg_param=self.reg_param, 
             pair_reg_param=self.pair_reg_param, 
             entropy_param=self.entropy_param, 
-            fit_pairs=self.fit_pairs, 
             device=self.device, 
-            pairs_list=self.pairs_list, 
             kernel_size=self.kernel_size,
             kernel_weight=self.kernel_weight,
             pair_kernel_size=self.pair_kernel_size,
@@ -1308,6 +1315,8 @@ class BaseDNAMiteModel(nn.Module):
         self.selected_pair_indices = [
             [self.selected_feats.index(feat) for feat in pair] for pair in self.selected_pairs
         ]
+        
+        self.pairs_list = torch.LongTensor(self.selected_pair_indices).to(self.device)
         
         print("Number of interaction features selected: ", len(self.selected_pairs))
         
@@ -1526,7 +1535,7 @@ class BaseDNAMiteModel(nn.Module):
             
         df = pd.concat(dfs)
             
-        return df
+        return df.reset_index()
     
     def plot_shape_function(self, feature_names, is_cat_cols=None, plot_missing_bin=False):
         """
@@ -3526,7 +3535,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
         df = pd.concat(dfs)
             
-        return df
+        return df.reset_index()
     
     def plot_shape_function(self, feature_names, eval_time, is_cat_cols=None, plot_missing_bin=False):
         """
@@ -3576,6 +3585,8 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
         else:
             fig, axes = plt.subplots(1, num_axes, figsize=(4*num_axes, 4))
+            if num_axes == 1:
+                axes = [axes]
         
         ax_idx = 0
         
@@ -3624,7 +3635,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                     ax_idx += 1
                     
             else:
-                print(shape_data["bin"].value_counts())
+                shape_data = shape_data.fillna("NA")
                 sns.barplot(x="bin", y="score", data=shape_data, errorbar=('ci', 95), ax=axes[ax_idx])
                 # make the x-axis labels tilted
                 axes[ax_idx].tick_params(axis='x', rotation=45)
