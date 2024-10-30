@@ -1155,7 +1155,7 @@ class BaseDNAMiteModel(nn.Module):
         Perform feature selection. Selected features and pairs will be stored in model.selected_feats
         and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
         
-        Parameters:
+        Parameters
         ----------
         X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
             The input features for the model.
@@ -1210,7 +1210,7 @@ class BaseDNAMiteModel(nn.Module):
             cat_feat_mask=self.cat_feat_mask
         ).to(self.device)
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.Adam(model.Parameters(), lr=self.learning_rate)
         
         if partialed_indices is not None:
             print("TRAINING ON PARTIALED FEATS")
@@ -1282,7 +1282,7 @@ class BaseDNAMiteModel(nn.Module):
         val_loader = self.get_data_loader(X_val, y_val, pairs=X_val_interactions, shuffle=False)
         
         optimizer = torch.optim.Adam(
-            [p for p in model.parameters() if p.requires_grad], 
+            [p for p in model.Parameters() if p.requires_grad], 
             lr=self.learning_rate / 5
         )
         
@@ -1315,7 +1315,7 @@ class BaseDNAMiteModel(nn.Module):
         """
         Train model.
 
-        Parameters:
+        Parameters
         ----------
         X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
             The input features for training.
@@ -1373,7 +1373,7 @@ class BaseDNAMiteModel(nn.Module):
         """
         Predict labels using the trained model.
         
-        Parameters:
+        Parameters
         ----------
         X_test : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
             The input features for prediction.
@@ -1411,7 +1411,7 @@ class BaseDNAMiteModel(nn.Module):
         """
         Get the feature importance scores for all features in the model.
         
-        Parameters:
+        Parameters
         ----------
         ignore_missing_bin : bool, default=False
             Whether to ignore the missing bin when computing feature importances.
@@ -1453,7 +1453,7 @@ class BaseDNAMiteModel(nn.Module):
         """
         Plot a bar plot with the importance score for the top k features.
         
-        Parameters:
+        Parameters
         ----------
         k : int, default=10
             Number of features to plot.
@@ -1479,7 +1479,7 @@ class BaseDNAMiteModel(nn.Module):
         """
         Get the shape function data, i.e. the bin scores, for a given feature.
         
-        Parameters:
+        Parameters
         ----------
         feature_name : str
             The name of the feature.
@@ -1530,7 +1530,7 @@ class BaseDNAMiteModel(nn.Module):
         """
         Plot the shape function for given feature(s).
         
-        Parameters:
+        Parameters
         ----------
         feature_names : str or list of str
             The name of the feature(s) to plot.
@@ -1571,6 +1571,8 @@ class BaseDNAMiteModel(nn.Module):
             
         else:
             fig, axes = plt.subplots(1, num_axes, figsize=(4*num_axes, 4))
+            if num_axes == 1:
+                axes = [axes]
         
         ax_idx = 0
         
@@ -1633,7 +1635,7 @@ class BaseDNAMiteModel(nn.Module):
         """
         Get the shape function data for an interaction affect.
         
-        Parameters:
+        Parameters
         ----------
         feat1_name : str
             The name of the first feature in the pair/interaction.
@@ -1733,7 +1735,7 @@ class BaseDNAMiteModel(nn.Module):
         """
         Plot a heatmap for an interaction shape function.
         
-        Parameters:
+        Parameters
         ----------
         feat1_name : str
             The name of the first feature in the pair/interaction.
@@ -1759,27 +1761,48 @@ class BaseDNAMiteModel(nn.Module):
       
 class DNAMiteRegressor(BaseDNAMiteModel):
     """
-    DNAMite model for regression
-    n_features: number of features in the data
-    n_embed: embedding dimension
-    n_hidden: hidden layer dimension
-    max_bins: maximum number of bins to discretize each feature
-    validation_size: proportion of data to use for validation
-    n_val_splits: number of validation splits to average over
-    learning_rate: learning rate for the optimizer
-    max_epochs: maximum number of epochs to train for
-    batch_size: batch size for training
-    device: device to run the model on
-    fit_pairs: whether to fit pairs of features
-    reg_param: regularization parameter
-    pair_reg_param: regularization parameter for pairs
-    entropy_param: parameter for entropy loss
-    kernel_size: size of the kernel for single features
-    kernel_weight: weight of the kernel for single features
-    pair_kernel_size: size of the kernel for pairs of features
-    pair_kernel_weight: weight of the kernel for pairs
-    save_dir: directory to save the model
-    **kwargs: other arguments to pass to BaseDNAMiteModel
+    DNAMiteRegressor is a model for regression using the DNAMite architecture.
+
+    Parameters
+    ----------
+    n_features : int
+        The number of input features.
+    n_embed : int, optional (default=32)
+        The size of the embedding layer.
+    n_hidden : int, optional (default=32)
+        The number of hidden units in the hidden layers.
+    max_bins : int, optional (default=32)
+        The maximum number of bins for discretizing continuous features.
+    validation_size : float, optional (default=0.2)
+        The proportion of the dataset to include in the validation split.
+    n_val_splits : int, optional (default=5)
+        The number of validation splits for cross-validation.
+    learning_rate : float, optional (default=5e-4)
+        The learning rate for the optimizer.
+    max_epochs : int, optional (default=100)
+        The maximum number of epochs for training.
+    batch_size : int, optional (default=128)
+        The batch size for training.
+    device : str, optional (default="cpu")
+        The device to run the model on ("cpu" or "cuda").
+    fit_pairs : bool, optional (default=True)
+        Whether to fit the model on pairs of features.
+    reg_param : float, optional (default=0)
+        The regularization parameter.
+    pair_reg_param : float, optional (default=0)
+        The regularization parameter for pairwise training.
+    entropy_param : float, optional (default=0)
+        The entropy regularization parameter.
+    kernel_size : int, optional (default=5)
+        The size of the kernel in convolutional layers for single features.
+    kernel_weight : float, optional (default=1)
+        The weight of the kernel for single feature convolutional layers.
+    pair_kernel_size : int, optional (default=3)
+        The size of the kernel for pairwise convolutional layers.
+    pair_kernel_weight : float, optional (default=1)
+        The weight of the kernel for pairwise convolutional layers.
+    save_dir : str, optional
+        Directory path to save model outputs.
     """
     
     def __init__(self,
@@ -1965,37 +1988,251 @@ class DNAMiteRegressor(BaseDNAMiteModel):
                 total_loss += loss.item() 
         
         return total_loss / len(test_loader), torch.cat(preds)
+    
+    def fit(X, y, partialed_feats=None):
+        """
+        Train model.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for training. 
+            Missing values should be encoded as np.nan.
+            Categorical features will automatically be detected as all columns with dtype "object" or "category".
+
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The labels, should be floats in (-inf, inf).
+
+        partialed_feats : list or None, optional
+            A list of features that should be fit completely before fitting all other features.
+        """
+        return super().fit(X, y, partialed_feats=partialed_feats)
+    
+    def get_feature_importances(self, ignore_missing_bin=False):
+        """
+        Get the feature importance scores for all features in the model.
+        
+        Parameters
+        ----------
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing feature importances.
+            If the missing bin is ignored, then the importance is only calculated over samples where 
+            the feature is not missing. 
+            
+        Returns:
+        ----------
+        importances : pandas.DataFrame
+            A DataFrame containing the feature importance scores for each feature.
+        """
+        
+        return super().get_feature_importances(ignore_missing_bin)
+    
+    def get_pair_shape_function(self, feat1_name, feat2_name, is_feat1_cat_col=False, is_feat2_cat_col=False):
+        """
+        Get the shape function data for an interaction affect.
+        
+        Parameters
+        ----------
+        feat1_name : str
+            The name of the first feature in the pair/interaction.
+        
+        feat2_name : str
+            The name of the second feature in the pair/interaction.
+            
+        is_feat1_cat_col : bool, default=False
+            Whether the first feature is a categorical feature.
+            
+        is_feat2_cat_col : bool, default=False
+            Whether the second feature is a categorical feature.
+        
+        Returns:
+        ----------
+        pair_data_dnamite : pandas.DataFrame
+            A DataFrame containing the shape function data for the interaction effect.
+        """
+        
+        return super().get_pair_shape_function(feat1_name, feat2_name, is_feat1_cat_col, is_feat2_cat_col)
+    
+    def get_shape_function(self, feature_name, is_cat_col=False):
+        """
+        Get the shape function data, i.e. the bin scores, for a given feature.
+        
+        Parameters
+        ----------
+        feature_name : str
+            The name of the feature.
+            
+        is_cat_col : bool, default=False
+            Whether the feature is a categorical feature.
+            
+        Returns:
+        ----------
+        df : pandas.DataFrame
+            A DataFrame containing the bin scores for the feature.
+        """
+        
+        return super().get_shape_function(feature_name, is_cat_col)
+    
+    def plot_feature_importances(self, k=10, ignore_missing_bin=False):
+        """
+        Plot a bar plot with the importance score for the top k features.
+        
+        Parameters
+        ----------
+        k : int, default=10
+            Number of features to plot.
+            
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing feature importances.
+            If the missing bin is ignored, then the importance is only calculated over samples where 
+            the feature is not missing.
+        """
+        
+        return super().plot_feature_importances(k, ignore_missing_bin)
+    
+    def plot_pair_shape_function(self, feat1_name, feat2_name, is_feat1_cat_col=False, is_feat2_cat_col=False):
+        """
+        Plot a heatmap for an interaction shape function.
+        
+        Parameters
+        ----------
+        feat1_name : str
+            The name of the first feature in the pair/interaction.
+            
+        feat2_name : str
+            The name of the second feature in the pair/interaction.
+            
+        is_feat1_cat_col : bool, default=False
+            Whether the first feature is a categorical feature.
+            
+        is_feat2_cat_col : bool, default=False
+            Whether the second feature is a categorical feature.
+        
+        """
+        
+        return super().plot_pair_shape_function(feat1_name, feat2_name, is_feat1_cat_col, is_feat2_cat_col)
+    
+    def plot_shape_function(self, feature_names, is_cat_cols=None, plot_missing_bin=False):
+        """
+        Plot the shape function for given feature(s).
+        
+        Parameters
+        ----------
+        feature_names : str or list of str
+            The name of the feature(s) to plot.
+            
+        is_cat_cols : bool or list of bool, default=None
+            Whether the feature(s) are categorical features.
+            If None, all features are assumed to be continuous.
+            If a single boolean is provided, all features are assumed to be of the same type.
+            If a list of booleans is provided, it should have the same length as feature_names.
+            
+        plot_missing_bin : bool, default=False
+            Whether to plot the missing bin.
+            Only applicable for continuous features.
+        """
+        
+        return super().plot_shape_function(feature_names, is_cat_cols, plot_missing_bin)
+    
+    def predict(self, X_test):
+        """
+        Predict labels using the trained model.
+        
+        Parameters
+        ----------
+        X_test : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for prediction.
+        
+        """
+        
+        return super().predict(X_test)
+    
+    def select_features(self, X, y, partialed_feats=None):
+        """
+        Perform feature selection. Selected features and pairs will be stored in model.selected_feats
+        and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
+        
+        Parameters
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for the model.
+            
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The labels, should be floats in (-inf, inf).
+            
+        partialed_feats : list or None, optional
+            A list of features that should be fit completely before fitting all other features.
+        """
+        
+        return super().select_features(X, y, partialed_feats)
 
 class DNAMiteBinaryClassifier(BaseDNAMiteModel):
-    """ 
-    # DNAMite Model for binary classification
-    # n_features: number of features in the data
-    # n_embed: embedding dimension
-    # n_hidden: hidden layer dimension
-    # max_bins: maximum number of bins to discretize each feature
-    # validation_size: proportion of data to use for validation
-    # n_val_splits: number of validation splits to average over
-    # learning_rate: learning rate for the optimizer
-    # max_epochs: maximum number of epochs to train for
-    # batch_size: batch size for training
-    # device: device to run the model on
-    # **kwargs: other arguments to pass to _BaseSingleSplitDNAMiteModel
+    """
+    DNAMiteClassifier is a model for binary classification using the DNAMite architecture.
+
+    Parameters
+    ----------
+    n_features : int
+        The number of input features.
+    n_embed : int, optional (default=32)
+        The size of the embedding layer.
+    n_hidden : int, optional (default=32)
+        The number of hidden units in the hidden layers.
+    max_bins : int, optional (default=32)
+        The maximum number of bins for discretizing continuous features.
+    validation_size : float, optional (default=0.2)
+        The proportion of the dataset to include in the validation split.
+    n_val_splits : int, optional (default=5)
+        The number of validation splits for cross-validation.
+    learning_rate : float, optional (default=5e-4)
+        The learning rate for the optimizer.
+    max_epochs : int, optional (default=100)
+        The maximum number of epochs for training.
+    batch_size : int, optional (default=128)
+        The batch size for training.
+    device : str, optional (default="cpu")
+        The device to run the model on ("cpu" or "cuda").
+    fit_pairs : bool, optional (default=True)
+        Whether to fit the model on pairs of features.
+    reg_param : float, optional (default=0)
+        The regularization parameter.
+    pair_reg_param : float, optional (default=0)
+        The regularization parameter for pairwise training.
+    entropy_param : float, optional (default=0)
+        The entropy regularization parameter.
+    kernel_size : int, optional (default=5)
+        The size of the kernel in convolutional layers for single features.
+    kernel_weight : float, optional (default=1)
+        The weight of the kernel for single feature convolutional layers.
+    pair_kernel_size : int, optional (default=3)
+        The size of the kernel for pairwise convolutional layers.
+    pair_kernel_weight : float, optional (default=1)
+        The weight of the kernel for pairwise convolutional layers.
+    save_dir : str, optional
+        Directory path to save model outputs.
     """
     
     
-    def __init__(
-        self, 
-        n_features, 
-        n_embed=32,
-        n_hidden=32, 
-        max_bins=32,
-        validation_size=0.2,
-        n_val_splits=5,
-        learning_rate=1e-4,
-        max_epochs=100,
-        batch_size=128,
-        device="cpu",
-        **kwargs
+    def __init__(self,
+                 n_features, 
+                 n_embed=32, 
+                 n_hidden=32, 
+                 max_bins=32, 
+                 validation_size=0.2, 
+                 n_val_splits=5, 
+                 learning_rate=5e-4, 
+                 max_epochs=100, 
+                 batch_size=128, 
+                 device="cpu", 
+                 fit_pairs=True, 
+                 reg_param=0, 
+                 pair_reg_param=0, 
+                 entropy_param=0, 
+                 kernel_size=5, 
+                 kernel_weight=1, 
+                 pair_kernel_size=3, 
+                 pair_kernel_weight=1, 
+                 save_dir=None,
     ):
         super().__init__(
             n_features=n_features,
@@ -2009,7 +2246,15 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             max_epochs=max_epochs,
             batch_size=batch_size,
             device=device,
-            **kwargs    
+            fit_pairs=fit_pairs,
+            reg_param=reg_param,
+            pair_reg_param=pair_reg_param,
+            entropy_param=entropy_param,
+            kernel_size=kernel_size,
+            kernel_weight=kernel_weight,
+            pair_kernel_size=pair_kernel_size,
+            pair_kernel_weight=pair_kernel_weight,
+            save_dir=save_dir, 
         )
             
         
@@ -2151,38 +2396,253 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         
         return total_loss / len(test_loader), torch.cat(preds)
     
+    def fit(X, y, partialed_feats=None):
+        """
+        Train model.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for training. 
+            Missing values should be encoded as np.nan.
+            Categorical features will automatically be detected as all columns with dtype "object" or "category".
+
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The labels, should be label encoded as 0 and 1.
+
+        partialed_feats : list or None, optional
+            A list of features that should be fit completely before fitting all other features.
+        """
+        return super().fit(X, y, partialed_feats=partialed_feats)
+    
+    def get_feature_importances(self, ignore_missing_bin=False):
+        """
+        Get the feature importance scores for all features in the model.
+        
+        Parameters
+        ----------
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing feature importances.
+            If the missing bin is ignored, then the importance is only calculated over samples where 
+            the feature is not missing. 
+            
+        Returns:
+        ----------
+        importances : pandas.DataFrame
+            A DataFrame containing the feature importance scores for each feature.
+        """
+        
+        return super().get_feature_importances(ignore_missing_bin)
+    
+    def get_pair_shape_function(self, feat1_name, feat2_name, is_feat1_cat_col=False, is_feat2_cat_col=False):
+        """
+        Get the shape function data for an interaction affect.
+        
+        Parameters
+        ----------
+        feat1_name : str
+            The name of the first feature in the pair/interaction.
+        
+        feat2_name : str
+            The name of the second feature in the pair/interaction.
+            
+        is_feat1_cat_col : bool, default=False
+            Whether the first feature is a categorical feature.
+            
+        is_feat2_cat_col : bool, default=False
+            Whether the second feature is a categorical feature.
+        
+        Returns:
+        ----------
+        pair_data_dnamite : pandas.DataFrame
+            A DataFrame containing the shape function data for the interaction effect.
+        """
+        
+        return super().get_pair_shape_function(feat1_name, feat2_name, is_feat1_cat_col, is_feat2_cat_col)
+    
+    def get_shape_function(self, feature_name, is_cat_col=False):
+        """
+        Get the shape function data, i.e. the bin scores, for a given feature.
+        
+        Parameters
+        ----------
+        feature_name : str
+            The name of the feature.
+            
+        is_cat_col : bool, default=False
+            Whether the feature is a categorical feature.
+            
+        Returns:
+        ----------
+        df : pandas.DataFrame
+            A DataFrame containing the bin scores for the feature.
+        """
+        
+        return super().get_shape_function(feature_name, is_cat_col)
+    
+    def plot_feature_importances(self, k=10, ignore_missing_bin=False):
+        """
+        Plot a bar plot with the importance score for the top k features.
+        
+        Parameters
+        ----------
+        k : int, default=10
+            Number of features to plot.
+            
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing feature importances.
+            If the missing bin is ignored, then the importance is only calculated over samples where 
+            the feature is not missing.
+        """
+        
+        return super().plot_feature_importances(k, ignore_missing_bin)
+    
+    def plot_pair_shape_function(self, feat1_name, feat2_name, is_feat1_cat_col=False, is_feat2_cat_col=False):
+        """
+        Plot a heatmap for an interaction shape function.
+        
+        Parameters
+        ----------
+        feat1_name : str
+            The name of the first feature in the pair/interaction.
+            
+        feat2_name : str
+            The name of the second feature in the pair/interaction.
+            
+        is_feat1_cat_col : bool, default=False
+            Whether the first feature is a categorical feature.
+            
+        is_feat2_cat_col : bool, default=False
+            Whether the second feature is a categorical feature.
+        
+        """
+        
+        return super().plot_pair_shape_function(feat1_name, feat2_name, is_feat1_cat_col, is_feat2_cat_col)
+    
+    def plot_shape_function(self, feature_names, is_cat_cols=None, plot_missing_bin=False):
+        """
+        Plot the shape function for given feature(s).
+        
+        Parameters
+        ----------
+        feature_names : str or list of str
+            The name of the feature(s) to plot.
+            
+        is_cat_cols : bool or list of bool, default=None
+            Whether the feature(s) are categorical features.
+            If None, all features are assumed to be continuous.
+            If a single boolean is provided, all features are assumed to be of the same type.
+            If a list of booleans is provided, it should have the same length as feature_names.
+            
+        plot_missing_bin : bool, default=False
+            Whether to plot the missing bin.
+            Only applicable for continuous features.
+        """
+        
+        return super().plot_shape_function(feature_names, is_cat_cols, plot_missing_bin)
+    
+    def predict(self, X_test):
+        """
+        Predict labels using the trained model.
+        
+        Parameters
+        ----------
+        X_test : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for prediction.
+        
+        """
+        
+        return super().predict(X_test)
+    
+    def select_features(self, X, y, partialed_feats=None):
+        """
+        Perform feature selection. Selected features and pairs will be stored in model.selected_feats
+        and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
+        
+        Parameters
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for the model.
+            
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The labels, should be label encoded as 0 and 1.
+            
+        partialed_feats : list or None, optional
+            A list of features that should be fit completely before fitting all other features.
+        """
+        
+        return super().select_features(X, y, partialed_feats)
+    
 
 class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
-    """  
-    # DNAMite Model for multiclass classification
-    # n_features: number of features in the data
-    # n_embed: embedding dimension
-    # n_hidden: hidden layer dimension
-    # n_classes: number of classes
-    # max_bins: maximum number of bins to discretize each feature
-    # validation_size: proportion of data to use for validation
-    # n_val_splits: number of validation splits to average over
-    # learning_rate: learning rate for the optimizer
-    # max_epochs: maximum number of epochs to train for
-    # batch_size: batch size for training
-    # device: device to run the model on
-    # **kwargs: other arguments to pass to _BaseSingleSplitDNAMiteModel
+    """
+    DNAMiteClassifier is a model for multiclass classification using the DNAMite architecture.
+
+    Parameters
+    ----------
+    n_features : int
+        The number of input features.
+    n_classes : int
+        The number of classes.
+    n_embed : int, optional (default=32)
+        The size of the embedding layer.
+    n_hidden : int, optional (default=32)
+        The number of hidden units in the hidden layers.
+    max_bins : int, optional (default=32)
+        The maximum number of bins for discretizing continuous features.
+    validation_size : float, optional (default=0.2)
+        The proportion of the dataset to include in the validation split.
+    n_val_splits : int, optional (default=5)
+        The number of validation splits for cross-validation.
+    learning_rate : float, optional (default=5e-4)
+        The learning rate for the optimizer.
+    max_epochs : int, optional (default=100)
+        The maximum number of epochs for training.
+    batch_size : int, optional (default=128)
+        The batch size for training.
+    device : str, optional (default="cpu")
+        The device to run the model on ("cpu" or "cuda").
+    fit_pairs : bool, optional (default=True)
+        Whether to fit the model on pairs of features.
+    reg_param : float, optional (default=0)
+        The regularization parameter.
+    pair_reg_param : float, optional (default=0)
+        The regularization parameter for pairwise training.
+    entropy_param : float, optional (default=0)
+        The entropy regularization parameter.
+    kernel_size : int, optional (default=5)
+        The size of the kernel in convolutional layers for single features.
+    kernel_weight : float, optional (default=1)
+        The weight of the kernel for single feature convolutional layers.
+    pair_kernel_size : int, optional (default=3)
+        The size of the kernel for pairwise convolutional layers.
+    pair_kernel_weight : float, optional (default=1)
+        The weight of the kernel for pairwise convolutional layers.
+    save_dir : str, optional
+        Directory path to save model outputs.
     """
     
-    def __init__(
-        self, 
-        n_features, 
-        n_classes,
-        n_embed=32,
-        n_hidden=32, 
-        max_bins=32,
-        validation_size=0.2,
-        n_val_splits=5,
-        learning_rate=1e-4,
-        max_epochs=100,
-        batch_size=128,
-        device="cpu",
-        **kwargs
+    def __init__(self,
+                 n_features,
+                 n_classes, 
+                 n_embed=32, 
+                 n_hidden=32, 
+                 max_bins=32, 
+                 validation_size=0.2, 
+                 n_val_splits=5, 
+                 learning_rate=5e-4, 
+                 max_epochs=100, 
+                 batch_size=128, 
+                 device="cpu", 
+                 fit_pairs=True, 
+                 reg_param=0, 
+                 pair_reg_param=0, 
+                 entropy_param=0, 
+                 kernel_size=5, 
+                 kernel_weight=1, 
+                 pair_kernel_size=3, 
+                 pair_kernel_weight=1, 
+                 save_dir=None,
     ):
         super().__init__(
             n_features=n_features,
@@ -2196,7 +2656,15 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             max_epochs=max_epochs,
             batch_size=batch_size,
             device=device,
-            **kwargs    
+            fit_pairs=fit_pairs,
+            reg_param=reg_param,
+            pair_reg_param=pair_reg_param,
+            entropy_param=entropy_param,
+            kernel_size=kernel_size,
+            kernel_weight=kernel_weight,
+            pair_kernel_size=pair_kernel_size,
+            pair_kernel_weight=pair_kernel_weight,
+            save_dir=save_dir, 
         )
             
         
@@ -2340,7 +2808,6 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
     
     
     def get_feature_importances(self, ignore_missing_bin=False):
-        # Default for multiclass is to compute importances summed across all classes
         
         importances = []
         for i, model in enumerate(self.models):
@@ -2405,11 +2872,149 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             )
             
         return pd.concat(dfs)
+    
+    def fit(X, y, partialed_feats=None):
+        """
+        Train model.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for training. 
+            Missing values should be encoded as np.nan.
+            Categorical features will automatically be detected as all columns with dtype "object" or "category".
+
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The labels, should be label encoded as 0, 1, ..., n_classes-1.
+
+        partialed_feats : list or None, optional
+            A list of features that should be fit completely before fitting all other features.
+        """
+        return super().fit(X, y, partialed_feats=partialed_feats)
+    
+    def get_pair_shape_function(self, feat1_name, feat2_name, is_feat1_cat_col=False, is_feat2_cat_col=False):
+        """
+        Get the shape function data for an interaction affect.
+        
+        Parameters
+        ----------
+        feat1_name : str
+            The name of the first feature in the pair/interaction.
+        
+        feat2_name : str
+            The name of the second feature in the pair/interaction.
+            
+        is_feat1_cat_col : bool, default=False
+            Whether the first feature is a categorical feature.
+            
+        is_feat2_cat_col : bool, default=False
+            Whether the second feature is a categorical feature.
+        
+        Returns:
+        ----------
+        pair_data_dnamite : pandas.DataFrame
+            A DataFrame containing the shape function data for the interaction effect.
+        """
+        
+        return super().get_pair_shape_function(feat1_name, feat2_name, is_feat1_cat_col, is_feat2_cat_col)
+    
+    def plot_feature_importances(self, k=10, ignore_missing_bin=False):
+        """
+        Plot a bar plot with the importance score for the top k features.
+        
+        Parameters
+        ----------
+        k : int, default=10
+            Number of features to plot.
+            
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing feature importances.
+            If the missing bin is ignored, then the importance is only calculated over samples where 
+            the feature is not missing.
+        """
+        
+        return super().plot_feature_importances(k, ignore_missing_bin)
+    
+    def plot_pair_shape_function(self, feat1_name, feat2_name, is_feat1_cat_col=False, is_feat2_cat_col=False):
+        """
+        Plot a heatmap for an interaction shape function.
+        
+        Parameters
+        ----------
+        feat1_name : str
+            The name of the first feature in the pair/interaction.
+            
+        feat2_name : str
+            The name of the second feature in the pair/interaction.
+            
+        is_feat1_cat_col : bool, default=False
+            Whether the first feature is a categorical feature.
+            
+        is_feat2_cat_col : bool, default=False
+            Whether the second feature is a categorical feature.
+        
+        """
+        
+        return super().plot_pair_shape_function(feat1_name, feat2_name, is_feat1_cat_col, is_feat2_cat_col)
+    
+    def plot_shape_function(self, feature_names, is_cat_cols=None, plot_missing_bin=False):
+        """
+        Plot the shape function for given feature(s).
+        
+        Parameters
+        ----------
+        feature_names : str or list of str
+            The name of the feature(s) to plot.
+            
+        is_cat_cols : bool or list of bool, default=None
+            Whether the feature(s) are categorical features.
+            If None, all features are assumed to be continuous.
+            If a single boolean is provided, all features are assumed to be of the same type.
+            If a list of booleans is provided, it should have the same length as feature_names.
+            
+        plot_missing_bin : bool, default=False
+            Whether to plot the missing bin.
+            Only applicable for continuous features.
+        """
+        
+        return super().plot_shape_function(feature_names, is_cat_cols, plot_missing_bin)
+    
+    def predict(self, X_test):
+        """
+        Predict labels using the trained model.
+        
+        Parameters
+        ----------
+        X_test : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for prediction.
+        
+        """
+        
+        return super().predict(X_test)
+    
+    def select_features(self, X, y, partialed_feats=None):
+        """
+        Perform feature selection. Selected features and pairs will be stored in model.selected_feats
+        and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
+        
+        Parameters
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for the model.
+            
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The labels, should be label encoded as 0, 1, ..., n_classes-1.
+            
+        partialed_feats : list or None, optional
+            A list of features that should be fit completely before fitting all other features.
+        """
+        
+        return super().select_features(X, y, partialed_feats)
 
 
 class DNAMiteSurvival(BaseDNAMiteModel):
     """
-    DNAMiteSurvival is a model for survival analysis using DNAMite architecture.
+    DNAMiteSurvival is a model for survival analysis using the DNAMite architecture.
 
     Parameters
     ----------
@@ -2421,6 +3026,8 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         The size of the embedding layer.
     n_hidden : int, optional (default=32)
         The number of hidden units in the hidden layers.
+    n_layers : int, optional (default=2)
+        The number of layers in the model.
     max_bins : int, optional (default=32)
         The maximum number of bins for discretizing continuous features.
     validation_size : float, optional (default=0.2)
@@ -2435,10 +3042,30 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         The batch size for training.
     device : str, optional (default="cpu")
         The device to run the model on ("cpu" or "cuda").
-    **kwargs : dict
-        Additional keyword arguments for the base class.
-        
+    fit_pairs : bool, optional (default=True)
+        Whether to fit the model on pairs of samples.
+    pairs_list : list, optional
+        A list of pairs for pairwise training, if applicable.
+    gamma : float, optional (default=1)
+        The gamma parameter for the loss function.
+    reg_param : float, optional (default=0)
+        The regularization parameter.
+    pair_reg_param : float, optional (default=0)
+        The regularization parameter for pairwise training.
+    entropy_param : float, optional (default=0)
+        The entropy regularization parameter.
+    kernel_size : int, optional (default=5)
+        The size of the kernel in convolutional layers.
+    kernel_weight : float, optional (default=1)
+        The weight of the kernel in convolutional layers.
+    pair_kernel_size : int, optional (default=3)
+        The size of the kernel for pairwise convolutional layers.
+    pair_kernel_weight : float, optional (default=1)
+        The weight of the kernel for pairwise convolutional layers.
+    save_dir : str, optional
+        Directory path to save model outputs.
     """
+
     
     def __init__(
         self, 
@@ -2684,6 +3311,24 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         return total_loss / len(test_loader), torch.cat(preds)   
     
     def select_features(self, X, y, partialed_feats=None):
+        """
+        Perform feature selection. Selected features and pairs will be stored in model.selected_feats
+        and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
+        
+        Parameters
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for the model.
+            
+        y : structured np.array of shape (n_samples,) with dtype [("event", bool), ("time", float)]
+            Survival labels.
+            Event: True if event occurred, False if censored.
+            Time: Time to event or time of censoring.
+            
+        partialed_feats : list or None, optional
+            A list of features that should be fit completely before fitting all other features.
+        """
+        
         self.cde = CensoringDistributionEstimator()
         self.cde.fit(y)
     
@@ -2705,6 +3350,20 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         return super().select_features(X, y, partialed_feats=partialed_feats)
     
     def fit(self, X, y, partialed_feats=None):
+        """
+        Train model.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for training.
+
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The target variable or labels.
+
+        partialed_feats : list or None, optional
+            A list of features that should be fit completely before fitting all other features.
+        """
         
         self.cde = CensoringDistributionEstimator()
         self.cde.fit(y)
@@ -2729,6 +3388,23 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         return
     
     def get_feature_importances(self, eval_time=None, ignore_missing_bin=False):
+        """
+        Get the feature importance scores for all features in the model.
+        
+        Parameters
+        ----------
+        eval_time : float or None, default=None
+            The evaluation time for which to compute the feature importance.
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing feature importances.
+            If the missing bin is ignored, then the importance is only calculated over samples where 
+            the feature is not missing. 
+            
+        Returns
+        -------
+        importances : pandas.DataFrame
+            A DataFrame containing the feature importance scores for each feature.
+        """
         
         if eval_time is not None:
             eval_index = np.searchsorted(self.eval_times.cpu().numpy(), eval_time)
@@ -2765,6 +3441,23 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         return self.importances
     
     def plot_feature_importances(self, k=10, eval_time=None, ignore_missing_bin=False):
+        """
+        Plot a bar plot with the importance score for the top k features.
+        
+        Parameters
+        ----------
+        k : int, default=10
+            Number of features to plot.
+            
+        eval_time : float or None, default=None
+            The evaluation time for which to compute the feature importance.
+            
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing feature importances.
+            If the missing bin is ignored, then the importance is only calculated over samples where 
+            the feature is not missing.
+        """
+        
         plt.figure(figsize=(6, 4))
 
         feat_imps = self.get_feature_importances(eval_time=eval_time, ignore_missing_bin=ignore_missing_bin)
@@ -2777,6 +3470,25 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         plt.tight_layout()
     
     def get_shape_function(self, feature_name, eval_time, is_cat_col=False):
+        """
+        Get the shape function data, i.e. the bin scores, for a given feature.
+        
+        Parameters
+        ----------
+        feature_name : str
+            The name of the feature.
+            
+        eval_time : float
+            The evaluation time for which to compute the shape function.
+            
+        is_cat_col : bool, default=False
+            Whether the feature is a categorical feature.
+            
+        Returns
+        -------
+        df : pandas.DataFrame
+            A DataFrame containing the bin scores for the feature.
+        """
         
         eval_index = np.searchsorted(self.eval_times.cpu().numpy(), eval_time)
         
@@ -2798,14 +3510,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                 
             else:
                 
-                # replace feature bins with ordinal encoded values
-                # number of feature bins is number of unique categories + 1, and 
-                # then one additional for the missing bin (represented by -1)
-                
-                # feat_bin_values = np.arange(-1, len(model.feature_bins[col_index])+1)
                 feat_bin_values = model.feature_bins[col_index]
-                print("FEAT BIN VALUE FOR MODEL", i, ":", feat_bin_values)
-                # print("FEAT BIN VALUE FOR MODEL", i, ":", feat_bin_values)
                 
             dfs.append(
                 pd.DataFrame({
@@ -2822,6 +3527,27 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         return df
     
     def plot_shape_function(self, feature_names, eval_time, is_cat_cols=None, plot_missing_bin=False):
+        """
+        Plot the shape function for given feature(s).
+        
+        Parameters
+        ----------
+        feature_names : str or list of str
+            The name of the feature(s) to plot.
+            
+        eval_time : float
+            The evaluation time for which to compute the shape function.
+            
+        is_cat_cols : bool or list of bool, default=None
+            Whether the feature(s) are categorical features.
+            If None, all features are assumed to be continuous.
+            If a single boolean is provided, all features are assumed to be of the same type.
+            If a list of booleans is provided, it should have the same length as feature_names.
+            
+        plot_missing_bin : bool, default=False
+            Whether to plot the missing bin.
+            Only applicable for continuous features.
+        """
         
         if isinstance(feature_names, str):
             feature_names = [feature_names]
@@ -2906,6 +3632,31 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         plt.tight_layout()
     
     def get_pair_shape_function(self, feat1_name, feat2_name, eval_time, is_feat1_cat_col=False, is_feat2_cat_col=False):
+        """
+        Get the shape function data for an interaction affect.
+        
+        Parameters
+        ----------
+        feat1_name : str
+            The name of the first feature in the pair/interaction.
+        
+        feat2_name : str
+            The name of the second feature in the pair/interaction.
+            
+        eval_time : float
+            The evaluation time to compute the interaction shape function at.
+            
+        is_feat1_cat_col : bool, default=False
+            Whether the first feature is a categorical feature.
+            
+        is_feat2_cat_col : bool, default=False
+            Whether the second feature is a categorical feature.
+        
+        Returns
+        -------
+        pair_data_dnamite : pandas.DataFrame
+            A DataFrame containing the shape function data for the interaction effect.
+        """
         
         eval_index = np.searchsorted(self.eval_times.cpu().numpy(), eval_time)
         
@@ -2961,9 +3712,71 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             bin_scores.append(pair_bin_scores)
             bin_values.append(pair_bin_values)
                 
-        return bin_scores, bin_values
+        # return bin_scores, bin_values
+        
+        pair_scores = np.mean(np.stack(bin_scores), axis=0)
+        pair_values = bin_values[0]
+
+        pair_data_dnamite = pd.DataFrame({
+            feat1_name: pair_values[:, 0],
+            feat2_name: pair_values[:, 1],
+            "score": pair_scores
+        })
+
+        pair_data_dnamite = pair_data_dnamite.pivot(
+            index=feat1_name, 
+            columns=feat2_name, 
+            values="score"
+        )
+
+        # Round the values in the columns and index
+        # Round the index and columns to 3 decimal places and reassign
+        pair_data_dnamite.index = pair_data_dnamite.index.to_series().round(3)
+        pair_data_dnamite.columns = pair_data_dnamite.columns.to_series().round(3)
+        
+        return pair_data_dnamite
+    
+    def plot_pair_shape_function(self, feat1_name, feat2_name, eval_time, is_feat1_cat_col=False, is_feat2_cat_col=False):
+        """
+        Plot a heatmap for an interaction shape function.
+        
+        Parameters
+        ----------
+        feat1_name : str
+            The name of the first feature in the pair/interaction.
+            
+        feat2_name : str
+            The name of the second feature in the pair/interaction.
+            
+        eval_time : float
+            The evaluation time to plot the interaction shape function at.
+            
+        is_feat1_cat_col : bool, default=False
+            Whether the first feature is a categorical feature.
+            
+        is_feat2_cat_col : bool, default=False
+            Whether the second feature is a categorical feature.
+        
+        """
+        
+        plt.figure(figsize=(4, 4))
+        
+        pair_data_dnamite = self.get_pair_shape_function(feat1_name, feat2_name, eval_time, is_feat1_cat_col=is_feat1_cat_col, is_feat2_cat_col=is_feat2_cat_col)
+
+        sns.heatmap(pair_data_dnamite)
+        
+        plt.tight_layout()
     
     def predict(self, X_test, y_test=None):
+        """
+        Predict labels using the trained model.
+        
+        Parameters
+        ----------
+        X_test : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for prediction.
+        
+        """
         
         # self.selected_pair_indices = list(combinations(range(self.n_features), 2))
         
@@ -2993,7 +3806,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         X : array-like
             Input data used to generate prediction. Should usually be a held-out test set.
             
-        y : structures np.array with dtype [("event", bool), ("time", float)]
+        y : structured np.array of shape (n_samples,) with dtype [("event", bool), ("time", float)]
             Survival labels for corresponding to X.
             
         eval_time : float
