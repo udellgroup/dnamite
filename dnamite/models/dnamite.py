@@ -132,12 +132,14 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
         self.kernel_weight = kernel_weight
         self.pair_kernel_size = pair_kernel_size
         self.pair_kernel_weight = pair_kernel_weight
-        self.pairs_list = torch.LongTensor(pairs_list).to(device)
+        self.pairs_list = pairs_list
         if pairs_list is not None:
+            self.pairs_list = torch.LongTensor(pairs_list).to(device)
             self.selected_pair_indices = pairs_list
             self.n_pairs = len(pairs_list)
         else:
             self.selected_pair_indices = list(combinations(range(n_features), 2))
+            self.pairs_list = torch.LongTensor(self.selected_pair_indices).to(device)
             self.n_pairs = len(self.selected_pair_indices)
             
         self.init_pairs_params(self.n_pairs)
@@ -1337,7 +1339,6 @@ class BaseDNAMiteModel(nn.Module):
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
         """
-
         
         if partialed_feats is not None:
             partialed_indices = [X.columns.get_loc(feat) for feat in partialed_feats]
@@ -1408,7 +1409,7 @@ class BaseDNAMiteModel(nn.Module):
                 test_preds[i, ...] = model_preds.cpu().numpy()
         
         else:
-            X_test_interactions = X_test_discrete.values[:, self.selected_pair_indices]
+            X_test_interactions = X_test_discrete.values[:, self.pairs_list]
             test_loader = self.get_data_loader(X_test_discrete, y_test, pairs=X_test_interactions, shuffle=False)
             
             test_preds = np.zeros((self.n_val_splits, X_test.shape[0]))
@@ -1713,7 +1714,7 @@ class BaseDNAMiteModel(nn.Module):
                     model.feature_bins[col2_index]
                 ])
 
-            pair_bin_values = self.make_grid(feat1_bin_values, feat2_bin_values)
+            pair_bin_values = self._make_grid(feat1_bin_values, feat2_bin_values)
             
             bin_scores.append(pair_bin_scores)
             bin_values.append(pair_bin_values)
@@ -2000,7 +2001,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         
         return total_loss / len(test_loader), torch.cat(preds)
     
-    def fit(X, y, partialed_feats=None):
+    def fit(self, X, y, partialed_feats=None):
         """
         Train model.
 
@@ -2407,7 +2408,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         
         return total_loss / len(test_loader), torch.cat(preds)
     
-    def fit(X, y, partialed_feats=None):
+    def fit(self, X, y, partialed_feats=None):
         """
         Train model.
 
@@ -2884,7 +2885,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             
         return pd.concat(dfs)
     
-    def fit(X, y, partialed_feats=None):
+    def fit(self, X, y, partialed_feats=None):
         """
         Train model.
 
@@ -3694,7 +3695,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             feat1_nbins = len(model.feature_bins[col1_index])
             feat2_nbins = len(model.feature_bins[col2_index])
             
-            grid = self.make_grid(np.arange(0, feat1_nbins+2), np.arange(0, feat2_nbins+2))
+            grid = self._make_grid(np.arange(0, feat1_nbins+2), np.arange(0, feat2_nbins+2))
             
             if is_feat1_cat_col and not is_feat2_cat_col:
                 pair_bin_scores = pair_bin_scores[grid[:, 0] > 0]
@@ -3720,7 +3721,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                     model.feature_bins[col2_index]
                 ])
 
-            pair_bin_values = self.make_grid(feat1_bin_values, feat2_bin_values)
+            pair_bin_values = self._make_grid(feat1_bin_values, feat2_bin_values)
             
             bin_scores.append(pair_bin_scores)
             bin_values.append(pair_bin_values)
@@ -3799,7 +3800,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         if y_test is None:
             y_test = np.zeros(X_test.shape[0], dtype=[("event", "?"), ("time", "f8")])
         
-        X_test_interactions = X_test_discrete.values[:, self.selected_pair_indices]
+        X_test_interactions = X_test_discrete.values[:, self.pairs_list]
         
         test_loader = self.get_data_loader(X_test_discrete, y_test, pairs=X_test_interactions, shuffle=False)
         
