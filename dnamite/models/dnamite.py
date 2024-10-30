@@ -1011,7 +1011,9 @@ class BaseDNAMiteModel(nn.Module):
                     # Ordinal encoder and force missing/unknown value to be 0
                     ordinal_encoder = OrdinalEncoder(dtype=float, handle_unknown="use_encoded_value", unknown_value=-1, encoded_missing_value=-1)
                     X_discrete[:, i] = ordinal_encoder.fit_transform(X_discrete[:, i].reshape(-1, 1)).flatten() + 1.0
-                    bins = [np.nan] + list(ordinal_encoder.categories_[0])
+                    
+                    # Remove nan from categories and insert at beginning
+                    bins = [np.nan] + [c for c in ordinal_encoder.categories_[0] if c is not None and c == c]
                 
                 self.feature_bins.append(bins)
                 
