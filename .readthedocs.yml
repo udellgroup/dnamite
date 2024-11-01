@@ -7,8 +7,6 @@ python:
   install:
     - requirements: docs/requirements.txt
     - path: .
-      method: pip
-      editable: true
 
 # Set the OS, Python version and other tools you might need
 build:
