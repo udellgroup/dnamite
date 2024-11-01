@@ -22,7 +22,8 @@ extensions = [
     'sphinx.ext.autodoc',  # This enables autodoc
     'sphinx_rtd_theme',
     'nbsphinx',  # Enable nbsphinx for .ipynb support
-    "sphinx.ext.napoleon" # NumPy style docstrings
+    "sphinx.ext.napoleon", # NumPy style docstrings
+    'myst_parser'
 ]
 
 templates_path = ['_templates']

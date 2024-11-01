@@ -1,9 +1,14 @@
 Models
 ========
 
-.. .. automodule:: dnamite.models
-..     :members:
-..     :imported-members:  
+.. toctree::
+   :maxdepth: 1
+   :titlesonly:
+
+   dnamite.models.DNAMiteRegressor
+   dnamite.models.DNAMiteBinaryClassifier
+   dnamite.models.DNAMiteMulticlassClassifier
+   dnamite.models.DNAMiteSurvival
 
 .. autoclass:: dnamite.models.DNAMiteRegressor
     :members:
