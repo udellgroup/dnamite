@@ -1436,8 +1436,8 @@ class BaseDNAMiteModel(nn.Module):
         """
         Get the feature importance scores for all features in the model.
             
-        Returns:
-        ----------
+        Returns
+        -------
         importances : pandas.DataFrame
             A DataFrame containing the feature importance scores for each feature.
         """
@@ -1494,8 +1494,8 @@ class BaseDNAMiteModel(nn.Module):
         feature_name : str
             The name of the feature.
             
-        Returns:
-        ----------
+        Returns
+        -------
         df : pandas.DataFrame
             A DataFrame containing the bin scores for the feature.
         """
@@ -1647,8 +1647,8 @@ class BaseDNAMiteModel(nn.Module):
         feat2_name : str
             The name of the second feature in the pair/interaction.
         
-        Returns:
-        ----------
+        Returns
+        -------
         pair_data_dnamite : pandas.DataFrame
             A DataFrame containing the shape function data for the interaction effect.
         """
@@ -2015,8 +2015,8 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         """
         Get the feature importance scores for all features in the model.
             
-        Returns:
-        ----------
+        Returns
+        -------
         importances : pandas.DataFrame
             A DataFrame containing the feature importance scores for each feature.
         """
@@ -2035,8 +2035,8 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         feat2_name : str
             The name of the second feature in the pair/interaction.
         
-        Returns:
-        ----------
+        Returns
+        -------
         pair_data_dnamite : pandas.DataFrame
             A DataFrame containing the shape function data for the interaction effect.
         """
@@ -2052,8 +2052,8 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         feature_name : str
             The name of the feature.
             
-        Returns:
-        ----------
+        Returns
+        -------
         df : pandas.DataFrame
             A DataFrame containing the bin scores for the feature.
         """
@@ -2402,8 +2402,8 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             If the missing bin is ignored, then the importance is only calculated over samples where 
             the feature is not missing. 
             
-        Returns:
-        ----------
+        Returns
+        -------
         importances : pandas.DataFrame
             A DataFrame containing the feature importance scores for each feature.
         """
@@ -2422,8 +2422,8 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         feat2_name : str
             The name of the second feature in the pair/interaction.
         
-        Returns:
-        ----------
+        Returns
+        -------
         pair_data_dnamite : pandas.DataFrame
             A DataFrame containing the shape function data for the interaction effect.
         """
@@ -2439,8 +2439,8 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         feature_name : str
             The name of the feature.
             
-        Returns:
-        ----------
+        Returns
+        -------
         df : pandas.DataFrame
             A DataFrame containing the bin scores for the feature.
         """
@@ -2876,8 +2876,8 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         feat2_name : str
             The name of the second feature in the pair/interaction.
         
-        Returns:
-        ----------
+        Returns
+        -------
         pair_data_dnamite : pandas.DataFrame
             A DataFrame containing the shape function data for the interaction effect.
         """
