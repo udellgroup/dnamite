@@ -7,7 +7,7 @@ Models
 
    dnamite.models.DNAMiteRegressor
    dnamite.models.DNAMiteBinaryClassifier
-   dnamite.models.DNAMiteMulticlassClassifier
+..    dnamite.models.DNAMiteMulticlassClassifier
    dnamite.models.DNAMiteSurvival
 
 .. autoclass:: dnamite.models.DNAMiteRegressor
@@ -18,9 +18,9 @@ Models
     :members:
     :show-inheritance:
 
-.. autoclass:: dnamite.models.DNAMiteMulticlassClassifier
-    :members:
-    :show-inheritance:
+.. .. autoclass:: dnamite.models.DNAMiteMulticlassClassifier
+..     :members:
+..     :show-inheritance:
 
 .. autoclass:: dnamite.models.DNAMiteSurvival
     :members:
