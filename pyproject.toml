@@ -25,6 +25,10 @@ dependencies = [
     "scikit_survival>=0.22.2",
     "torch>=1.13.1",
     "tqdm>=4.64.1",
+    "interpret>=0.4.2",
+    "interpret_core>=0.4.2",
+    "matplotlib>=3.6.2",
+    "seaborn>=0.13.2",
 ] 
 
 [tool.setuptools.packages]
