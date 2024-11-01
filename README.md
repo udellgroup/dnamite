@@ -2,7 +2,9 @@
 
 DNAMite: a package for Discrete Neural Additive Models. 
 
-![dnamite-logo](docs/dynamite.png)
+<p align="center">
+  <img src="docs/dynamite.png" alt="dnamite-logo">
+</p>
 
 ### Installation
 
