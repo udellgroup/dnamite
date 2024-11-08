@@ -1,12 +1,10 @@
 User Guides
 ===============
 
-Coming soon!
+This is a series of User Guides intended to help users understand how to use the DNAMite package.
 
-.. This is a series of User Guides intended to help users understand how to use the DNAMite package.
+.. toctree::
+   :maxdepth: 1
 
-.. .. toctree::
-..    :maxdepth: 2
-
-..    survival_analysis.ipynb
-..    faqs.md
+   why_dnamite.ipynb
+   survival_analysis.ipynb
