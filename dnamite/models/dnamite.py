@@ -1020,17 +1020,23 @@ class BaseDNAMiteModel(nn.Module):
                 if self.feature_dtypes[i] == 'continuous':
                     X_discrete[:, i], bins = discretize(np.ascontiguousarray(X_discrete[:, i]), max_bins=self.max_bins)
                 elif self.feature_dtypes[i] == 'binary':
-                    bins = [np.nan, 0, 1]
-                    X_discrete[:, i] = np.where(
-                        np.isnan(X_discrete[:, i].astype(float)), 0, X_discrete[:, i] + 1.0
-                    )
+                    bins = [0, 1]
+                    # X_discrete[:, i] = np.where(
+                    #     np.isnan(X_discrete[:, i].astype(float)), 0, X_discrete[:, i] + 1.0
+                    # )
                 else:
                     # Ordinal encoder and force missing/unknown value to be 0
                     ordinal_encoder = OrdinalEncoder(dtype=float, handle_unknown="use_encoded_value", unknown_value=-1, encoded_missing_value=-1)
-                    X_discrete[:, i] = ordinal_encoder.fit_transform(X_discrete[:, i].reshape(-1, 1)).flatten() + 1.0
+                    X_discrete[:, i] = ordinal_encoder.fit_transform(X_discrete[:, i].reshape(-1, 1)).flatten() # + 1.0
+                    if X_discrete[:, i].min() == -1:
+                        # offset and add np.nan to bins
+                        X_discrete[:, i] += 1.0
+                        bins = [np.nan] + [c for c in ordinal_encoder.categories_[0] if c is not None and c == c]
+                    else:
+                        bins = [c for c in ordinal_encoder.categories_[0] if c is not None and c == c]
                     
                     # Remove nan from categories and insert at beginning
-                    bins = [np.nan] + [c for c in ordinal_encoder.categories_[0] if c is not None and c == c]
+                    # bins = [np.nan] + [c for c in ordinal_encoder.categories_[0] if c is not None and c == c]
                 
                 self.feature_bins.append(bins)
                 
@@ -1081,8 +1087,11 @@ class BaseDNAMiteModel(nn.Module):
                 ]
             else:
                 pairs_list = None
+                
+            feature_sizes = [self.feature_sizes[self.feature_names_in_.get_loc(feat)] for feat in self.selected_feats]
         else:
             pairs_list = self.pairs_list
+            feature_sizes = self.feature_sizes
         
         # Get data loaders
         train_loader = self.get_data_loader(X_train, y_train)
@@ -1091,7 +1100,7 @@ class BaseDNAMiteModel(nn.Module):
         model = _BaseSingleSplitDNAMiteModel(
             n_features=X_train.shape[1], 
             n_output=self.n_output,
-            feature_sizes=self.feature_sizes, 
+            feature_sizes=feature_sizes, 
             n_embed=self.n_embed,
             n_hidden=self.n_hidden, 
             n_layers=self.n_layers,
@@ -1143,6 +1152,19 @@ class BaseDNAMiteModel(nn.Module):
             mains=True
         )
         
+        if hasattr(self, 'selected_feats'):
+            model.feature_bins = [self.feature_bins[self.feature_names_in_.get_loc(feat)] for feat in self.selected_feats]
+            model.bin_counts = [
+                get_bin_counts(X_train[col], nb) for col, nb in zip(X_train.columns, feature_sizes)
+            ]
+        else:
+            model.feature_bins = self.feature_bins
+                
+            # Compute the bin counts
+            model.bin_counts = [
+                get_bin_counts(X_train[col], nb) for col, nb in zip(X_train.columns, self.feature_sizes)
+            ]
+        
         if not self.fit_pairs:
             return model
         
@@ -1170,6 +1192,13 @@ class BaseDNAMiteModel(nn.Module):
             mains=False
         )
         
+        if self.fit_pairs:
+            pairs_list = model.pairs_list.cpu().numpy()
+            model.pair_bin_counts = [
+                get_pair_bin_counts(X_train.iloc[:, col1], X_train.iloc[:, col2]) 
+                for col1, col2 in pairs_list
+            ]
+    
         return model
     
     def select_features(self, X, y, partialed_feats=None):
@@ -1374,19 +1403,19 @@ class BaseDNAMiteModel(nn.Module):
             
             # Fit to this split
             model = self._fit_one_split(X_train, y_train, X_val, y_val, partialed_indices=partialed_indices)
-            model.feature_bins = self.feature_bins
+            # model.feature_bins = self.feature_bins
             
-            # Compute the bin counts
-            model.bin_counts = [
-                get_bin_counts(X_train[col], nb) for col, nb in zip(X_train.columns, self.feature_sizes)
-            ]
+            # # Compute the bin counts
+            # model.bin_counts = [
+            #     get_bin_counts(X_train[col], nb) for col, nb in zip(X_train.columns, self.feature_sizes)
+            # ]
             
-            if self.fit_pairs:
-                pairs_list = model.pairs_list.cpu().numpy()
-                model.pair_bin_counts = [
-                    get_pair_bin_counts(X_train.iloc[:, col1], X_train.iloc[:, col2]) 
-                    for col1, col2 in pairs_list
-                ]
+            # if self.fit_pairs:
+            #     pairs_list = model.pairs_list.cpu().numpy()
+            #     model.pair_bin_counts = [
+            #         get_pair_bin_counts(X_train.iloc[:, col1], X_train.iloc[:, col2]) 
+            #         for col1, col2 in pairs_list
+            #     ]
             
             self.models.append(model)
             
@@ -1481,7 +1510,7 @@ class BaseDNAMiteModel(nn.Module):
         top_k_features = feat_imps.groupby("feature")["importance"].agg(["mean", "sem"])
         top_k_features = top_k_features.sort_values("mean", ascending=True).tail(k)
 
-        plt.barh(top_k_features.index, top_k_features["mean"], yerr=1.96*top_k_features["sem"])
+        plt.barh(top_k_features.index, top_k_features["mean"], xerr=1.96*top_k_features["sem"])
 
         plt.tight_layout()
     
@@ -3414,7 +3443,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         top_k_features = feat_imps.groupby("feature")["importance"].agg(["mean", "sem"])
         top_k_features = top_k_features.sort_values("mean", ascending=True).tail(k)
 
-        plt.barh(top_k_features.index, top_k_features["mean"], yerr=1.96*top_k_features["sem"])
+        plt.barh(top_k_features.index, top_k_features["mean"], xerr=1.96*top_k_features["sem"])
 
         plt.tight_layout()
     
@@ -3444,6 +3473,9 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
             col_index = model.feature_names_in_.get_loc(feature_name)
             
+            print("COL INDEX", col_index, self.feature_names_in_.get_loc(feature_name))
+            
+            
             feat_bin_scores = model.bin_scores[col_index][:, eval_index]
             
             
@@ -3454,6 +3486,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                     [model.feature_bins[col_index].min() - 0.01],
                     model.feature_bins[col_index]
                 ])
+                print("FEAT BIN VALUES", feat_bin_values[1], feat_bin_values[-1])
                 
             else:
                 
