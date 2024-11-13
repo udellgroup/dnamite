@@ -761,9 +761,11 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
             z_pairs = self.get_smooth_z_pairs()
             self.active_pairs = torch.where(z_pairs > 0)[0] 
             
-    def compute_intercept(self, bin_counts, ignore_missing_bin=False):
+    def compute_intercept(self, bin_counts, ignore_missing_bin=False, has_missing_bin=None):
         
         # bin counts is a list of bin counts for each feature
+        if has_missing_bin is None:
+            has_missing_bin = [True] * self.n_features
         
         self.bin_counts = bin_counts
         self.feat_offsets = torch.zeros(self.n_features, self.n_output).to(self.device)
@@ -772,7 +774,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
             bin_preds = self.get_bin_scores(feat_idx, center=False)
             feat_bin_counts = torch.tensor(bin_counts[feat_idx]).to(self.device).unsqueeze(-1)
             
-            if ignore_missing_bin:
+            if ignore_missing_bin and has_missing_bin[feat_idx]:
                 feat_bin_counts = feat_bin_counts[1:]
                 bin_preds = bin_preds[1:, :]
             
@@ -1050,9 +1052,15 @@ class BaseDNAMiteModel(nn.Module):
     
     def _compute_bin_scores(self, ignore_missing_bin_in_intercept=True):
         
+        has_missing_bins = [bins[0] != bins[0] for bins in self.feature_bins]
+        
         for model in self.models:
         
-            model.compute_intercept(model.bin_counts, ignore_missing_bin=ignore_missing_bin_in_intercept)
+            model.compute_intercept(
+                model.bin_counts, 
+                ignore_missing_bin=ignore_missing_bin_in_intercept,
+                has_missing_bin=has_missing_bins
+            )
             
             model.bin_scores = []
             for i in range(model.n_features):
@@ -3471,10 +3479,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         dfs = []
         for i, model in enumerate(self.models):
         
-            col_index = model.feature_names_in_.get_loc(feature_name)
-            
-            print("COL INDEX", col_index, self.feature_names_in_.get_loc(feature_name))
-            
+            col_index = model.feature_names_in_.get_loc(feature_name)       
             
             feat_bin_scores = model.bin_scores[col_index][:, eval_index]
             
@@ -3486,7 +3491,6 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                     [model.feature_bins[col_index].min() - 0.01],
                     model.feature_bins[col_index]
                 ])
-                print("FEAT BIN VALUES", feat_bin_values[1], feat_bin_values[-1])
                 
             else:
                 
