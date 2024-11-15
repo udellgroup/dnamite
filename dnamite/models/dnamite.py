@@ -21,6 +21,8 @@ import os
 from functools import partial
 from dnamite.utils import discretize, get_bin_counts, get_pair_bin_counts
 from dnamite.loss_fns import ipcw_rps_loss
+import textwrap
+from contextlib import nullcontext
 
 # Class for a DNAMite model fit to one train/validation split
 # Full DNAMite model averages several of these single-split models
@@ -113,7 +115,8 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
                  pair_kernel_size=3,
                  pair_kernel_weight=1,
                  save_dir=None,
-                 cat_feat_mask=None
+                 cat_feat_mask=None,
+                 monotone_constraints=None,
                  ):
         super().__init__()
         self.n_features = n_features
@@ -155,6 +158,12 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
             self.save_dir = save_dir            
         else:
             self.save_dir = "model_saves/"
+            
+        self.monotone_constraints = monotone_constraints
+        if monotone_constraints is not None:
+            self.monotone_constraints_tensor = torch.tensor(monotone_constraints, device=device).view(1, n_features, 1)
+            self.monotone_params = nn.Parameter((torch.rand(n_features, n_output) * 0.2) - 0.1)
+            
             
         # check if save_dir exists
         if not os.path.exists(self.save_dir):
@@ -355,6 +364,8 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
         
         if mains is not None:
             
+            inputs = mains.clone()
+            
             if not on_partialed_set:
                 mains = mains[:, self.active_feats]
             
@@ -407,11 +418,26 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
                     w[self.active_feats, :, :]
                 ) + b[self.active_feats, :]
                 mains = a(mains)
-
+            
+            # Apply monotonic constraints
+            if self.monotone_constraints is not None:
+                mains_squared = torch.square(mains)
+                mains = torch.where(self.monotone_constraints_tensor == 1, mains_squared, mains)
+                mains = torch.where(self.monotone_constraints_tensor == -1, -1 * mains_squared, mains)
+                
+                for feat_idx in range(len(self.monotone_constraints)):
+                    if self.monotone_constraints[feat_idx] != 0:
+                        bin_scores = self.get_bin_scores(feat_idx, center=False, backprop=True) # (feature_size, n_output)
+                        # cum_bin_scores = torch.cumsum(bin_scores, dim=0)
+                        feat_input = inputs[:, feat_idx].long()
+                        mains[:, feat_idx, :] = bin_scores[feat_input - 1, :] + mains[:, feat_idx, :] # (batch_size, n_output)
+                
             # Get smoothed z
-            z_main = self.get_smooth_z()[self.active_feats]
-
-            output_main = torch.einsum('ijk,j->ik', mains, z_main)
+            if self.reg_param > 0:
+                z_main = self.get_smooth_z()[self.active_feats]
+                output_main = torch.einsum('ijk,j->ik', mains, z_main)
+            else:
+                output_main = mains.sum(dim=1)
         
         if pairs is not None:
             
@@ -512,9 +538,11 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
                 ) + b[self.active_pairs, :]
                 pairs = a(pairs)
                 
-            z_pairs = self.get_smooth_z_pairs()[self.active_pairs]
-            
-            output_pairs = torch.einsum('ijk,j->ik', pairs, z_pairs)
+            if self.pair_reg_param > 0:
+                z_pairs = self.get_smooth_z_pairs()[self.active_pairs]
+                output_pairs = torch.einsum('ijk,j->ik', pairs, z_pairs)
+            else:
+                output_pairs = pairs.sum(dim=1)
         
         
         return output_main + output_pairs
@@ -584,21 +612,22 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
     # Get the predicted score for a feature in each bin
     # feat_index: index of the feature
     # center: whether to center the bin scores so that sum over training set is 0
-    def get_bin_scores(self, feat_index, center=True):
+    def get_bin_scores(self, feat_index, center=True, backprop=False):
         
-        with torch.no_grad():
+        context = torch.no_grad() if not backprop else nullcontext()
         
-            inputs = torch.arange(0, self.feature_sizes[feat_index]).to(self.device)
+        with context:
+        
+            feat_inputs = torch.arange(0, self.feature_sizes[feat_index]).to(self.device)
             
             # Add offsets to features to get the correct indices
             # offsets = torch.tensor(self.embedding_offsets).unsqueeze(0).expand(inputs.size(0), -1).to(self.device)
             offset = self.embedding_offsets[feat_index]
-            inputs = inputs + offset
+            inputs = feat_inputs + offset
             
             if self.kernel_size > 0 and not self.cat_feat_mask[feat_index]:
                 
                 # Apply kernel smoothing to the embeddings
-                
                 inputs = inputs.unsqueeze(-1) + torch.arange(-self.kernel_size, self.kernel_size+1).to(self.device)
                 weights = torch.exp(-torch.square(torch.arange(-self.kernel_size, self.kernel_size+1).to(self.device)) / (2 * self.kernel_weight))
                 
@@ -627,11 +656,28 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
                     w[feat_index, :, :]
                 ) + b[feat_index, :]
                 mains = a(mains)
+                
+            # Apply monotonic constraints
+            if self.monotone_constraints is not None and self.monotone_constraints[feat_index] != 0:
+                mains_squared = torch.square(mains)
+                if self.monotone_constraints[feat_index] == 1:
+                    mains = mains_squared
+                elif self.monotone_constraints[feat_index] == -1:
+                    mains = -1 * mains_squared
+                
+                # bin_scores = self.get_bin_scores(feat_idx, center=False) # (feature_size, n_output)
+                # cum_bin_scores = torch.cumsum(mains, dim=0)
+                # feat_input = feat_inputs.long()
+                # mains = self.monotone_params[[feat_index], :] + cum_bin_scores[feat_input - 1, :] + mains # (batch_size, n_output)
+                mains = torch.cumsum(mains, dim=0) + self.monotone_params[[feat_index], :]
+
 
             # Get prediction using the smoothed z
-            z_main = self.get_smooth_z()
-            # prediction = output_main.squeeze() * z_main[feat_index]
-            prediction = mains * z_main[feat_index]
+            if self.reg_param > 0:
+                z_main = self.get_smooth_z()
+                prediction = mains * z_main[feat_index]
+            else:
+                prediction = mains
             
             if hasattr(self, 'feat_offsets') and center:
                 return prediction - self.feat_offsets[feat_index, :]
@@ -945,7 +991,8 @@ class BaseDNAMiteModel(nn.Module):
                  kernel_weight=1, 
                  pair_kernel_size=3, 
                  pair_kernel_weight=1, 
-                 save_dir=None
+                 save_dir=None,
+                 monotone_constraints=None
     ):
         super().__init__()
         self.n_features = n_features
@@ -974,6 +1021,7 @@ class BaseDNAMiteModel(nn.Module):
         self.pair_kernel_size = pair_kernel_size
         self.pair_kernel_weight = pair_kernel_weight
         self.save_dir = save_dir
+        self.monotone_constraints = monotone_constraints
     
     def _infer_data_types(self, X):
         
@@ -1120,7 +1168,8 @@ class BaseDNAMiteModel(nn.Module):
             pair_kernel_size=self.pair_kernel_size,
             pair_kernel_weight=self.pair_kernel_weight,
             save_dir=self.save_dir,
-            cat_feat_mask=self.cat_feat_mask
+            cat_feat_mask=self.cat_feat_mask,
+            monotone_constraints=self.monotone_constraints
         ).to(self.device)
         model.feature_names_in_ = X_train.columns
         
@@ -1157,7 +1206,7 @@ class BaseDNAMiteModel(nn.Module):
             test_loader=val_loader,
             optimizer=optimizer,
             n_epochs=self.max_epochs,
-            mains=True
+            mains=True,
         )
         
         if hasattr(self, 'selected_feats'):
@@ -1265,7 +1314,8 @@ class BaseDNAMiteModel(nn.Module):
             pair_kernel_size=self.pair_kernel_size,
             pair_kernel_weight=self.pair_kernel_weight,
             save_dir=self.save_dir,
-            cat_feat_mask=self.cat_feat_mask
+            cat_feat_mask=self.cat_feat_mask,
+            monotone_constraints=self.monotone_constraints
         ).to(self.device)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
@@ -1450,6 +1500,15 @@ class BaseDNAMiteModel(nn.Module):
             
         # Make placeholder y_test
         y_test = np.zeros(X_test_discrete.shape[0])
+        
+        if hasattr(self, 'selected_feats'):
+            print("Found selected features. Using only those features.")
+            X_test_discrete = X_test_discrete[self.selected_feats]
+            
+            if self.fit_pairs:
+                pairs_list = [
+                    [X_test_discrete.columns.get_loc(feat1), X_test_discrete.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs
+                ]    
             
         if not self.fit_pairs:
             test_loader = self.get_data_loader(X_test_discrete, y_test, shuffle=False)
@@ -1459,7 +1518,7 @@ class BaseDNAMiteModel(nn.Module):
                 test_preds[i, ...] = model_preds.cpu().numpy()
         
         else:
-            X_test_interactions = X_test_discrete.values[:, self.pairs_list]
+            X_test_interactions = X_test_discrete.values[:, pairs_list]
             test_loader = self.get_data_loader(X_test_discrete, y_test, pairs=X_test_interactions, shuffle=False)
             
             test_preds = np.zeros((self.n_val_splits, X_test.shape[0]))
@@ -1520,7 +1579,7 @@ class BaseDNAMiteModel(nn.Module):
 
         plt.barh(top_k_features.index, top_k_features["mean"], xerr=1.96*top_k_features["sem"])
 
-        plt.tight_layout()
+        # plt.tight_layout()
     
     def get_shape_function(self, feature_name):
         """
@@ -1628,7 +1687,7 @@ class BaseDNAMiteModel(nn.Module):
                         alpha=0.3,
                         step='post'
                     )
-                    axes[ax_idx].set_xlabel(feature_name)
+                    axes[ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
                     axes[ax_idx].set_ylabel("")
                     ax_idx += 1
                 else:
@@ -1643,7 +1702,7 @@ class BaseDNAMiteModel(nn.Module):
                         alpha=0.3,
                         step='post'
                     )
-                    axes[ax_idx].set_xlabel(feature_name)
+                    axes[ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
                     axes[ax_idx].set_ylabel("")
                     
                     ax_idx += 1
@@ -1862,6 +1921,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
                  pair_kernel_size=3, 
                  pair_kernel_weight=1, 
                  save_dir=None,
+                 monotone_constraints=None
     ):
         super().__init__(
             n_features=n_features,
@@ -1887,6 +1947,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
             pair_kernel_size=pair_kernel_size,
             pair_kernel_weight=pair_kernel_weight,
             save_dir=save_dir, 
+            monotone_constraints=monotone_constraints
         )
 
             
@@ -2243,6 +2304,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
                  pair_kernel_size=3, 
                  pair_kernel_weight=1, 
                  save_dir=None,
+                 monotone_constraints=None
     ):
         super().__init__(
             n_features=n_features,
@@ -2268,6 +2330,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             pair_kernel_size=pair_kernel_size,
             pair_kernel_weight=pair_kernel_weight,
             save_dir=save_dir, 
+            monotone_constraints=monotone_constraints
         )
             
         
@@ -2647,6 +2710,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
                  pair_kernel_size=3, 
                  pair_kernel_weight=1, 
                  save_dir=None,
+                 monotone_constraints=None
     ):
         super().__init__(
             n_features=n_features,
@@ -2672,6 +2736,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             pair_kernel_size=pair_kernel_size,
             pair_kernel_weight=pair_kernel_weight,
             save_dir=save_dir, 
+            monotone_constraints=monotone_constraints
         )
             
         
@@ -3085,6 +3150,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         pair_kernel_size=3, 
         pair_kernel_weight=1, 
         save_dir=None,
+        monotone_constraints=None
     ):
         super().__init__(
             n_features=n_features,
@@ -3111,6 +3177,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             pair_kernel_size=pair_kernel_size,
             pair_kernel_weight=pair_kernel_weight,
             save_dir=save_dir,
+            monotone_constraints=monotone_constraints
         )
             
         
@@ -3571,7 +3638,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                         alpha=0.3,
                         step='post'
                     )
-                    axes[ax_idx].set_xlabel(feature_name)
+                    axes[ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
                     axes[ax_idx].set_ylabel("")
                     ax_idx += 1
                 else:
@@ -3586,7 +3653,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                         alpha=0.3,
                         step='post'
                     )
-                    axes[ax_idx].set_xlabel(feature_name)
+                    axes[ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
                     axes[ax_idx].set_ylabel("")
                     
                     ax_idx += 1
