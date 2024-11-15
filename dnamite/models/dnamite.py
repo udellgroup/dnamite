@@ -1052,7 +1052,7 @@ class BaseDNAMiteModel(nn.Module):
     
     def _compute_bin_scores(self, ignore_missing_bin_in_intercept=True):
         
-        has_missing_bins = [bins[0] != bins[0] for bins in self.feature_bins]
+        has_missing_bins = [bins[0] != bins[0] if len(bins) > 0 else True for bins in self.feature_bins]
         
         for model in self.models:
         
