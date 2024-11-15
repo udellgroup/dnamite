@@ -94,6 +94,10 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
         The directory to save the model.
     cat_feat_mask : list or None, optional (default=None)
         The mask for categorical features.
+    monotone_constraints : list or None, optional (default=None)
+        The monotonic constraints for the features.
+        0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
+        None means no constraints.
     """
     def __init__(self, 
                  n_features, 
@@ -965,6 +969,10 @@ class BaseDNAMiteModel(nn.Module):
         Weight applied to the smoothing kernel for feature pairs.
     save_dir : str, optional
         Directory path to save model outputs and checkpoints; if None, no saving occurs.
+    monotone_constraints : list or None, optional (default=None)
+        The monotonic constraints for the features.
+        0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
+        None means no constraints.
     """
     
     def __init__(self, 
@@ -1896,6 +1904,10 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         The weight of the kernel for pairwise convolutional layers.
     save_dir : str, optional
         Directory path to save model outputs.
+    monotone_constraints : list or None, optional (default=None)
+        The monotonic constraints for the features.
+        0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
+        None means no constraints.
     """
     
     def __init__(self,
@@ -2278,6 +2290,10 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         The weight of the kernel for pairwise convolutional layers.
     save_dir : str, optional
         Directory path to save model outputs.
+    monotone_constraints : list or None, optional (default=None)
+        The monotonic constraints for the features.
+        0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
+        None means no constraints.
     """
     
     
@@ -2684,6 +2700,10 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         The weight of the kernel for pairwise convolutional layers.
     save_dir : str, optional
         Directory path to save model outputs.
+    monotone_constraints : list or None, optional (default=None)
+        The monotonic constraints for the features.
+        0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
+        None means no constraints.
     """
     
     def __init__(self,
@@ -3121,6 +3141,10 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         The weight of the kernel for pairwise convolutional layers.
     save_dir : str, optional
         Directory path to save model outputs.
+    monotone_constraints : list or None, optional (default=None)
+        The monotonic constraints for the features.
+        0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
+        None means no constraints.
     """
 
     
