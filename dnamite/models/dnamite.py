@@ -1517,6 +1517,8 @@ class BaseDNAMiteModel(nn.Module):
                 pairs_list = [
                     [X_test_discrete.columns.get_loc(feat1), X_test_discrete.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs
                 ]    
+        elif self.fit_pairs:
+            pairs_list = self.pairs_list
             
         if not self.fit_pairs:
             test_loader = self.get_data_loader(X_test_discrete, y_test, shuffle=False)
@@ -3864,6 +3866,17 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
         X_test_discrete = self._discretize_data(X_test)
         
+        if hasattr(self, 'selected_feats'):
+            print("Found selected features. Using only those features.")
+            X_test_discrete = X_test_discrete[self.selected_feats]
+            
+            if self.fit_pairs:
+                pairs_list = [
+                    [X_test_discrete.columns.get_loc(feat1), X_test_discrete.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs
+                ]    
+        elif self.fit_pairs:
+            pairs_list = self.pairs_list
+        
         # Make placeholder y_test
         y_test = np.zeros(X_test.shape[0], dtype=[("event", "?"), ("time", "f8")])
         
@@ -3875,7 +3888,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                 test_preds[i, ...] = model_preds.cpu().numpy()
                 
         else:
-            X_test_interactions = X_test_discrete.values[:, self.pairs_list]
+            X_test_interactions = X_test_discrete.values[:, pairs_list]
             test_loader = self.get_data_loader(X_test_discrete, y_test, pairs=X_test_interactions, shuffle=False)
             test_preds = np.zeros((self.n_val_splits, X_test.shape[0], self.n_output))
             for i, model in enumerate(self.models):
