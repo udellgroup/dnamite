@@ -8,3 +8,4 @@ This is a series of User Guides intended to help users understand how to use the
 
    why_dnamite.ipynb
    survival_analysis.ipynb
+   feature_selection.ipynb
