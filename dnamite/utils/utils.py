@@ -35,7 +35,7 @@ def discretize(x, max_bins, bins=None):
             processing="quantile",
             binning=None,
             max_bins=max_bins,
-            min_samples_bin=1,
+            min_samples_bin=min(0.01*x.shape[0], 50),
         )
     
     # Discretize using interpret's native discretize function

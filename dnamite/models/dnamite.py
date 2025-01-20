@@ -15,6 +15,7 @@ from itertools import combinations
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OrdinalEncoder
 from sklearn.compose import make_column_transformer
+from sklearn.metrics import mean_squared_error, roc_auc_score
 from sksurv.nonparametric import CensoringDistributionEstimator, kaplan_meier_estimator
 from tqdm import tqdm
 import os
@@ -23,6 +24,8 @@ from dnamite.utils import discretize, get_bin_counts, get_pair_bin_counts
 from dnamite.loss_fns import ipcw_rps_loss
 import textwrap
 from contextlib import nullcontext
+import copy
+from dnamite.utils import LoggingMixin
 
 # Class for a DNAMite model fit to one train/validation split
 # Full DNAMite model averages several of these single-split models
@@ -44,7 +47,7 @@ from contextlib import nullcontext
 # kernel_weight: weight for kernel smoothing
 # pair_kernel_size: window size for kernel smoothing for pairs
 # pair_kernel_weight: weight for kernel smoothing for pairs
-class _BaseSingleSplitDNAMiteModel(nn.Module):
+class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
     """
     _BaseSingleSplitDNAMiteModel is a private base class for DNAMite models trained on a single train/val split.
 
@@ -98,6 +101,9 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
         The monotonic constraints for the features.
         0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
         None means no constraints.
+    verbosity : int, optional (default=0)
+        The verbosity level of the model.
+        0: warning, 1: info, 2: debug.
     """
     def __init__(self, 
                  n_features, 
@@ -121,8 +127,10 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
                  save_dir=None,
                  cat_feat_mask=None,
                  monotone_constraints=None,
+                 verbosity=0
                  ):
-        super().__init__()
+        nn.Module.__init__(self)
+        LoggingMixin.__init__(self, verbosity=verbosity)
         self.n_features = n_features
         self.n_embed = n_embed
         self.n_hidden = n_hidden
@@ -377,7 +385,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
             offsets = self.embedding_offsets.unsqueeze(0).expand(mains.size(0), -1).to(self.device)
             mains = mains + offsets[:, self.active_feats]
             
-            if self.kernel_size > 0:
+            if self.kernel_size > 0 and self.kernel_weight > 0:
             
                 # Add neighboring indices to mains in new dimension
                 # mains is now of shape (batch_size, n_features, 2 * kernel_size + 1)
@@ -456,7 +464,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
             offsets = self.embedding_offsets[self.pairs_list[self.active_pairs]].to(self.device)
             pairs = pairs + offsets
             
-            if self.pair_kernel_size > 0:
+            if self.pair_kernel_size > 0 and self.pair_kernel_weight > 0:
             
                 # Pairs will now be shape (batch_size, n_pairs, 2 * pair_kernel_size + 1, 2 * pair_kernel_size + 1, 2)
                 pairs = self._get_pairs_neighbors(pairs)
@@ -629,7 +637,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
             offset = self.embedding_offsets[feat_index]
             inputs = feat_inputs + offset
             
-            if self.kernel_size > 0 and not self.cat_feat_mask[feat_index]:
+            if self.kernel_size > 0 and self.kernel_weight > 0 and not self.cat_feat_mask[feat_index]:
                 
                 # Apply kernel smoothing to the embeddings
                 inputs = inputs.unsqueeze(-1) + torch.arange(-self.kernel_size, self.kernel_size+1).to(self.device)
@@ -686,7 +694,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
             if hasattr(self, 'feat_offsets') and center:
                 return prediction - self.feat_offsets[feat_index, :]
             elif center:
-                print("Intercept not computed. Shape function will not be centered.")
+                self.logger.warning("Intercept not computed. Shape function will not be centered.")
                 return prediction
             else:
                 return prediction
@@ -713,7 +721,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
             offsets = self.embedding_offsets[self.pairs_list[pair_index]].to(self.device)
             pairs = pairs + offsets
             
-            if self.pair_kernel_size > 0 and not (self.cat_feat_mask[pair[0]] and self.cat_feat_mask[pair[1]]):
+            if self.pair_kernel_size > 0 and self.pair_kernel_weight > 0 and not (self.cat_feat_mask[pair[0]] and self.cat_feat_mask[pair[1]]):
             
                 # Pairs will now be shape (batch_size, 2 * pair_kernel_size + 1, 2 * pair_kernel_size + 1, 2)
                 pairs = self._get_pairs_neighbors(pairs)
@@ -793,7 +801,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
             if hasattr(self, 'pair_offsets') and center:
                 return prediction - self.pair_offsets[pair_index, :]
             elif center:
-                print("Intercept not computed. Shape function will not be centered.")
+                self.logger.warning("Intercept not computed. Shape function will not be centered.")
                 return prediction
             else:
                 return prediction
@@ -825,6 +833,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
             feat_bin_counts = torch.tensor(bin_counts[feat_idx]).to(self.device).unsqueeze(-1)
             
             if ignore_missing_bin and has_missing_bin[feat_idx]:
+                self.logger.debug("Ignoring missing bin for feature", feat_idx)
                 feat_bin_counts = feat_bin_counts[1:]
                 bin_preds = bin_preds[1:, :]
             
@@ -873,6 +882,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
 
         early_stopping_counter = 0
         best_test_loss = float('inf')
+        best_model_state = None
 
         for epoch in range(n_epochs):
             train_loss = train_epoch_fn(self, train_loader, optimizer)
@@ -885,37 +895,48 @@ class _BaseSingleSplitDNAMiteModel(nn.Module):
                 else:
                     self.prune_parameters(mains=False, pairs=True)
             
-            if verbose:
-                if show_feat_count:
-                    print(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f} | Active features: {len(self.active_feats)}")
-                elif show_pair_count:
-                    print(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f} | Active pairs: {len(self.active_pairs)}")
-                else:
-                    print(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f}")
+            if show_feat_count:
+                self.logger.info(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f} | Active features: {len(self.active_feats)}")
+            elif show_pair_count:
+                self.logger.info(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f} | Active pairs: {len(self.active_pairs)}")
+            else:
+                self.logger.info(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f}")
 
             # Check if the test loss has improved
+            # if test_loss < best_test_loss:
+            #     best_test_loss = test_loss
+            #     early_stopping_counter = 0
+                
+            #     # Save the model at the best test loss
+            #     # torch.save(self.state_dict(), "../model_saves/tmp_best_model.pt")
+            #     torch.save(self.state_dict(), os.path.join(self.save_dir, "tmp_best_model.pt"))
+                
+            # else:
+                # early_stopping_counter += 1
+                
             if test_loss < best_test_loss:
                 best_test_loss = test_loss
                 early_stopping_counter = 0
-                
-                # Save the model at the best test loss
-                # torch.save(self.state_dict(), "../model_saves/tmp_best_model.pt")
-                torch.save(self.state_dict(), os.path.join(self.save_dir, "tmp_best_model.pt"))
-                
+            
+                # Save the model state in memory (CPU)
+                best_model_state = {k: v.cpu() for k, v in self.state_dict().items()}
+            
             else:
                 early_stopping_counter += 1
 
             # If test loss has not improved for 5 consecutive epochs, terminate training
             if early_stopping_counter >= 5:
-                print(f"Early stopping at {epoch+1} epochs: Test loss has not improved for 5 consecutive epochs.")
+                self.logger.info(f"Early stopping at {epoch+1} epochs: Test loss has not improved for 5 consecutive epochs.")
                 break
             
         # Load the model from the best test loss
-        self.load_state_dict(torch.load(os.path.join(self.save_dir, "tmp_best_model.pt")))
+        # self.load_state_dict(torch.load(os.path.join(self.save_dir, "tmp_best_model.pt")))
+        if best_model_state is not None:
+            self.load_state_dict(best_model_state)
 
-        return
+        return best_test_loss
 
-class BaseDNAMiteModel(nn.Module):
+class BaseDNAMiteModel(nn.Module, LoggingMixin):
     """
     BaseDNAMiteModel is the parent class for DNAMite models.
 
@@ -973,6 +994,13 @@ class BaseDNAMiteModel(nn.Module):
         The monotonic constraints for the features.
         0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
         None means no constraints.
+    num_pairs : int, default=10
+        Number of pairwise interactions to use in the model.
+    verbosity : int, default=0
+        Level of verbosity for logging.
+        0: Warning, 1: Info, 2: Debug
+    random_state: int, default=None
+        Random seed for reproducibility.
     """
     
     def __init__(self, 
@@ -990,7 +1018,7 @@ class BaseDNAMiteModel(nn.Module):
                  device="cpu", 
                  fit_pairs=True,
                  pairs_list=None,
-                 gamma=1,
+                 gamma=None,
                  pair_gamma=None,
                  reg_param=0, 
                  pair_reg_param=0, 
@@ -1000,9 +1028,13 @@ class BaseDNAMiteModel(nn.Module):
                  pair_kernel_size=3, 
                  pair_kernel_weight=1, 
                  save_dir=None,
-                 monotone_constraints=None
+                 monotone_constraints=None,
+                 num_pairs=10,
+                 verbosity=0,
+                 random_state=None,
     ):
-        super().__init__()
+        nn.Module.__init__(self)
+        LoggingMixin.__init__(self, verbosity=verbosity)
         self.n_features = n_features
         self.n_embed = n_embed
         self.n_hidden = n_hidden
@@ -1017,8 +1049,8 @@ class BaseDNAMiteModel(nn.Module):
         self.device = device
         self.fit_pairs = fit_pairs
         self.pairs_list = pairs_list
-        if pairs_list is None and fit_pairs:
-            self.pairs_list = list(combinations(range(n_features), 2))
+        # if pairs_list is None and fit_pairs:
+        #     self.pairs_list = list(combinations(range(n_features), 2))
         self.gamma = gamma
         self.pair_gamma = pair_gamma if pair_gamma is not None else gamma
         self.reg_param = reg_param
@@ -1030,6 +1062,17 @@ class BaseDNAMiteModel(nn.Module):
         self.pair_kernel_weight = pair_kernel_weight
         self.save_dir = save_dir
         self.monotone_constraints = monotone_constraints
+        self.num_pairs = num_pairs
+        self.verbosity = verbosity
+        self.random_state = random_state
+        
+        self.models = nn.ModuleList()
+        
+    def _set_gamma(self, X):
+        if self.gamma is None:
+            self.gamma = min(((X.shape[0] / self.batch_size) / 250) / (self.n_hidden / 16), 1.0)
+        if self.pair_gamma is None:
+            self.pair_gamma = self.gamma / 4
     
     def _infer_data_types(self, X):
         
@@ -1061,45 +1104,73 @@ class BaseDNAMiteModel(nn.Module):
         if hasattr(self, 'feature_bins'):
             for i in range(self.n_features):
                 if self.feature_dtypes[i] == 'continuous':
-                    X_discrete[:, i], _ = discretize(X_discrete[:, i], max_bins=self.max_bins, bins=self.feature_bins[i])
+                    X_discrete[:, i], _ = discretize(np.ascontiguousarray(X_discrete[:, i]), max_bins=self.max_bins, bins=self.feature_bins[i])
                 elif self.feature_dtypes[i] == 'binary':
                     ordinal_map = {val: float(j) for j, val in enumerate(self.feature_bins[i])}
                     X_discrete[:, i] = np.vectorize(ordinal_map.get)(X_discrete[:, i].astype(float))
                 else:
                     ordinal_map = {val: float(j) for j, val in enumerate(self.feature_bins[i])}
+                    
+                    # Replace the NAs because they are handled incorrectly in dict
+                    X_discrete[:, i] = np.where(X_discrete[:, i] == X_discrete[:, i], X_discrete[:, i], "NA")
+                    ordinal_map["NA"] = 0.0
+                    
+                    for val in pd.Series(X_discrete[:, i]).unique():
+                        if val not in ordinal_map:
+                            # This means that the category was either not seen in training
+                            # Or was an infrequent category
+                            if self.feature_bins[i][-1] == "Other":
+                                ordinal_map[val] = self.feature_sizes[i] - 1.0
+                            else:
+                                ordinal_map[val] = 0.0
                     X_discrete[:, i] = np.vectorize(ordinal_map.get)(X_discrete[:, i])
                 
         else:
             self.feature_bins = []
             self.feature_sizes = []
-            print("Discretizing features...")
+            self.has_missing_bin = []
+            self.logger.debug("Discretizing features...")
             from time import time
-            for i in tqdm(range(self.n_features)):
+            for i in range(self.n_features):
                 if self.feature_dtypes[i] == 'continuous':
                     X_discrete[:, i], bins = discretize(np.ascontiguousarray(X_discrete[:, i]), max_bins=self.max_bins)
+                    self.has_missing_bin.append(True)
                 elif self.feature_dtypes[i] == 'binary':
                     bins = [0, 1]
-                    # X_discrete[:, i] = np.where(
-                    #     np.isnan(X_discrete[:, i].astype(float)), 0, X_discrete[:, i] + 1.0
-                    # )
+                    self.has_missing_bin.append(False)
                 else:
                     # Ordinal encoder and force missing/unknown value to be 0
-                    ordinal_encoder = OrdinalEncoder(dtype=float, handle_unknown="use_encoded_value", unknown_value=-1, encoded_missing_value=-1)
+                    ordinal_encoder = OrdinalEncoder(
+                        dtype=float, 
+                        min_frequency=min(0.01*X.shape[0], 50),
+                        handle_unknown="use_encoded_value", 
+                        unknown_value=-1, 
+                        encoded_missing_value=-1
+                    )
+                    
                     X_discrete[:, i] = ordinal_encoder.fit_transform(X_discrete[:, i].reshape(-1, 1)).flatten() # + 1.0
+                    
+                    infrequent_categories = ordinal_encoder.infrequent_categories_[0]
+                    if infrequent_categories is None:
+                        infrequent_categories = []
+                    
                     if X_discrete[:, i].min() == -1:
                         # offset and add np.nan to bins
                         X_discrete[:, i] += 1.0
-                        bins = [np.nan] + [c for c in ordinal_encoder.categories_[0] if c is not None and c == c]
+                        bins = [np.nan] + [c for c in ordinal_encoder.categories_[0] if c is not None and c == c and c not in infrequent_categories]
+                        self.has_missing_bin.append(True)
                     else:
-                        bins = [c for c in ordinal_encoder.categories_[0] if c is not None and c == c]
-                    
-                    # Remove nan from categories and insert at beginning
-                    # bins = [np.nan] + [c for c in ordinal_encoder.categories_[0] if c is not None and c == c]
+                        bins = [c for c in ordinal_encoder.categories_[0] if c is not None and c == c and c not in infrequent_categories]
+                        self.has_missing_bin.append(False)
+                        
+                    if len(infrequent_categories) > 0:
+                        bins.append("Other")
                 
                 self.feature_bins.append(bins)
                 
                 # Number of bins is (maximum bin index) + 1 (accounting for missing bin)
                 self.feature_sizes.append(int(X_discrete[:, i].max() + 1))
+                # self.feature_sizes.append(len(bins))
             
         if hasattr(X, 'columns'):
             X_discrete = pd.DataFrame(X_discrete, columns=col_names, dtype=float)
@@ -1108,14 +1179,14 @@ class BaseDNAMiteModel(nn.Module):
     
     def _compute_bin_scores(self, ignore_missing_bin_in_intercept=True):
         
-        has_missing_bins = [bins[0] != bins[0] if len(bins) > 0 else True for bins in self.feature_bins]
+        # has_missing_bins = [bins[0] != bins[0] if len(bins) > 0 else True for bins in self.feature_bins]
         
         for model in self.models:
         
             model.compute_intercept(
                 model.bin_counts, 
                 ignore_missing_bin=ignore_missing_bin_in_intercept,
-                has_missing_bin=has_missing_bins
+                has_missing_bin=self.has_missing_bin
             )
             
             model.bin_scores = []
@@ -1137,11 +1208,16 @@ class BaseDNAMiteModel(nn.Module):
                 
         return
     
-    def _fit_one_split(self, X_train, y_train, X_val, y_val, partialed_indices=None):
+    def _fit_one_split(self, X_train, y_train, X_val, y_val, random_state=None, partialed_indices=None):
+        
+        # Set random seed if one is provided
+        if random_state is not None:
+            torch.manual_seed(random_state)
+            np.random.seed(random_state)
         
         # If selected_feats is set, only use those features
         if hasattr(self, 'selected_feats'):
-            print("Found selected features. Using only those features.")
+            self.logger.debug("Found selected features. Using only those features.")
             X_train = X_train[self.selected_feats]
             X_val = X_val[self.selected_feats]
             
@@ -1155,9 +1231,11 @@ class BaseDNAMiteModel(nn.Module):
             feature_sizes = [self.feature_sizes[self.feature_names_in_.get_loc(feat)] for feat in self.selected_feats]
         else:
             pairs_list = self.pairs_list
+            # pairs_list = None
             feature_sizes = self.feature_sizes
         
         # Get data loaders
+        self.logger.debug("GETTING DATA LOADERS")
         train_loader = self.get_data_loader(X_train, y_train)
         val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
         
@@ -1177,14 +1255,15 @@ class BaseDNAMiteModel(nn.Module):
             pair_kernel_weight=self.pair_kernel_weight,
             save_dir=self.save_dir,
             cat_feat_mask=self.cat_feat_mask,
-            monotone_constraints=self.monotone_constraints
+            monotone_constraints=self.monotone_constraints,
+            verbosity=self.verbosity
         ).to(self.device)
         model.feature_names_in_ = X_train.columns
         
         optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
         
         if partialed_indices is not None:
-            print("TRAINING PARTIALED FEATS")
+            self.logger.debug("TRAINING PARTIALED FEATS")
             model.active_feats = torch.tensor(partialed_indices).to(self.device)
             
             # Get data loaders only for partialed feats
@@ -1206,7 +1285,7 @@ class BaseDNAMiteModel(nn.Module):
             train_loader = self.get_data_loader(X_train, y_train)
             val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
         
-        print("TRAINING MAINS")
+        self.logger.debug("TRAINING MAINS")
         model.train_(
             train_epoch_fn=partial(self.train_epoch_mains, partialed_indices=partialed_indices),
             test_epoch_fn=self.test_epoch_mains,
@@ -1235,6 +1314,16 @@ class BaseDNAMiteModel(nn.Module):
         
         model.freeze_main_effects()
         
+        if pairs_list is None:
+            # No pairs have been selected already, so do a round of pair selection
+            self.select_pairs(model, X_train, y_train, X_val, y_val, self.num_pairs)
+            pairs_list = self.pairs_list
+            model.selected_pair_indices = pairs_list # list version
+            model.pairs_list = torch.LongTensor(pairs_list).to(self.device) # tensor version
+            model.n_pairs = len(pairs_list)
+            model.init_pairs_params(model.n_pairs)
+            model.to(self.device)
+            
         X_train_interactions = X_train.values[:, pairs_list]
         X_val_interactions = X_val.values[:, pairs_list]
         
@@ -1246,7 +1335,7 @@ class BaseDNAMiteModel(nn.Module):
             lr=self.learning_rate / 5
         )
         
-        print("TRAINING PAIRS")
+        self.logger.debug("TRAINING PAIRS")
         model.train_(
             self.train_epoch_pairs, 
             self.test_epoch_pairs, 
@@ -1282,7 +1371,20 @@ class BaseDNAMiteModel(nn.Module):
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
         """
-
+        
+        if self.reg_param <= 0 and self.pair_reg_param <= 0:
+            raise ValueError("Regularization parameters must be greater than 0 for feature selection.")
+        
+        _ = self._select_features(X, y, partialed_feats=partialed_feats)
+        return
+    
+    def _select_features(self, X, y, partialed_feats=None, model=None):
+        self.logger.debug("STARTING SELECT FEATURES...")
+        
+        # Set random seed if one is provided
+        if self.random_state is not None:
+            torch.manual_seed(self.random_state)
+            np.random.seed(self.random_state)
             
         if partialed_feats is not None:
             partialed_indices = [X.columns.get_loc(feat) for feat in partialed_feats]
@@ -1298,38 +1400,43 @@ class BaseDNAMiteModel(nn.Module):
             X_discrete = X_discrete.values
         
         # Make one train/val split for feature selection
-        X_train, X_val, y_train, y_val = train_test_split(X_discrete, y, test_size=self.validation_size)
+        X_train, X_val, y_train, y_val = train_test_split(X_discrete, y, test_size=self.validation_size, random_state=self.random_state)
+        
+        # Set gamma using size of training data
+        self._set_gamma(X_train)
         
         # Get data loaders
         train_loader = self.get_data_loader(X_train, y_train)
         val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
         
-        model = _BaseSingleSplitDNAMiteModel(
-            n_features=self.n_features, 
-            n_output=self.n_output,
-            feature_sizes=self.feature_sizes, 
-            n_embed=self.n_embed,
-            n_hidden=self.n_hidden, 
-            n_layers=self.n_layers,
-            gamma=self.gamma, 
-            pair_gamma=self.pair_gamma,
-            reg_param=self.reg_param, 
-            pair_reg_param=self.pair_reg_param, 
-            entropy_param=self.entropy_param, 
-            device=self.device, 
-            kernel_size=self.kernel_size,
-            kernel_weight=self.kernel_weight,
-            pair_kernel_size=self.pair_kernel_size,
-            pair_kernel_weight=self.pair_kernel_weight,
-            save_dir=self.save_dir,
-            cat_feat_mask=self.cat_feat_mask,
-            monotone_constraints=self.monotone_constraints
-        ).to(self.device)
+        if model is None:
+            model = _BaseSingleSplitDNAMiteModel(
+                n_features=self.n_features, 
+                n_output=self.n_output,
+                feature_sizes=self.feature_sizes, 
+                n_embed=self.n_embed,
+                n_hidden=self.n_hidden, 
+                n_layers=self.n_layers,
+                gamma=self.gamma, 
+                pair_gamma=self.pair_gamma,
+                reg_param=self.reg_param, 
+                pair_reg_param=self.pair_reg_param, 
+                entropy_param=self.entropy_param, 
+                device=self.device, 
+                kernel_size=self.kernel_size,
+                kernel_weight=self.kernel_weight,
+                pair_kernel_size=self.pair_kernel_size,
+                pair_kernel_weight=self.pair_kernel_weight,
+                save_dir=self.save_dir,
+                cat_feat_mask=self.cat_feat_mask,
+                monotone_constraints=self.monotone_constraints,
+                verbosity=self.verbosity
+            ).to(self.device)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
         
         if partialed_indices is not None:
-            print("TRAINING ON PARTIALED FEATS")
+            self.logger.debug("TRAINING ON PARTIALED FEATS")
             
             model.active_feats = torch.tensor(partialed_indices).to(self.device)
             reg_param = model.reg_param
@@ -1364,7 +1471,7 @@ class BaseDNAMiteModel(nn.Module):
             train_loader = self.get_data_loader(X_train, y_train)
             val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
         
-        model.train_(
+        best_val_loss = model.train_(
             partial(self.train_epoch_mains, partialed_indices=partialed_indices), 
             self.test_epoch_mains, 
             train_loader, 
@@ -1376,11 +1483,13 @@ class BaseDNAMiteModel(nn.Module):
             show_feat_count=True
         )
         
-        print("Number of main features selected: ", len(model.active_feats))
+        self.logger.info(f"Number of main features selected: {len(model.active_feats)}")
         
         if not self.fit_pairs:
             self.selected_feats = self.feature_names_in_[model.active_feats.cpu().numpy()].tolist()
-            return
+            val_score = self.score(pd.DataFrame(X_val, columns=self.feature_names_in_), y_val, y_train, model=model)
+            # val_score = {"Test": 0}
+            return best_val_loss, val_score, model
 
         selected_feat_indices = model.active_feats.cpu().numpy()
         selected_pair_indices = list(combinations(selected_feat_indices, 2))
@@ -1404,7 +1513,7 @@ class BaseDNAMiteModel(nn.Module):
             lr=self.learning_rate / 5
         )
         
-        model.train_(
+        best_val_loss = model.train_(
             self.train_epoch_pairs, 
             self.test_epoch_pairs, 
             train_loader, 
@@ -1415,23 +1524,285 @@ class BaseDNAMiteModel(nn.Module):
             verbose=True,
             show_pair_count=True
         )
+        val_score = self.score(pd.DataFrame(X_val, columns=self.feature_names_in_), y_val, y_train, model=model)
+        # val_score = {"Test": 0}
         
         self.selected_feats = self.feature_names_in_[model.active_feats.cpu().numpy()].tolist()
         self.selected_pairs = [
             [self.feature_names_in_[pair[0]], self.feature_names_in_[pair[1]]]
             for pair in model.pairs_list[model.active_pairs].cpu().numpy()
         ]
-        # self.selected_pair_indices = [
-        #     [self.selected_feats.index(feat) for feat in pair] for pair in self.selected_pairs
-        # ]
         self.pairs_list = [selected_pair_indices[i] for i in model.active_pairs.cpu().numpy()]
         
-        # self.pairs_list = torch.LongTensor(self.selected_pair_indices).to(self.device)
-        # self.pairs_list= 
+        self.logger.info(f"Number of interaction features selected: {len(self.selected_pairs)}")
         
-        print("Number of interaction features selected: ", len(self.selected_pairs))
+        return best_val_loss, val_score, model
+    
+    def get_regularization_path(self, X, y, init_reg_param, partialed_feats=None):
+        
+        original_reg_param = self.reg_param
+        original_fit_pairs = self.fit_pairs
+        
+        self.reg_param = init_reg_param
+        self.fit_pairs = False
+        
+        n_feat_selected = np.inf
+        losses = []
+        num_feats = []
+        feats = {}
+        scores = []
+        model = None
+        
+        while n_feat_selected > 1:
+            if model is None:
+                self.logger.info(f"SELECTING FEATURES WITH REG PARAM: {self.reg_param}")
+            else:
+                self.logger.info(f"SELECTING FEATURES WITH REG PARAM: {model.reg_param}")
+            
+            # best_val_loss, model = self._select_features(X, y, partialed_feats=partialed_feats, model=model)
+            best_val_loss, val_score, _ = self._select_features(X, y, partialed_feats=partialed_feats)
+            n_feat_selected = len(self.selected_feats)
+            num_feats.append(n_feat_selected)
+            losses.append(best_val_loss)
+            feats[n_feat_selected] = self.selected_feats
+            scores.append(list(val_score.values())[0])
+            
+            self.logger.debug(f"Number of features selected: {n_feat_selected}")
+            self.logger.debug(f"Selected features: {self.selected_feats}")
+            self.logger.debug(f"Validation loss: {best_val_loss}")
+            self.logger.debug(f"Validation score: {val_score}")
+            
+            # model.reg_param = model.reg_param * 2
+            self.reg_param = self.reg_param * 2
+            del self.selected_feats
+            
+        self.reg_param = original_reg_param
+        self.fit_pairs = original_fit_pairs
+        
+        val_score_name = list(val_score.keys())[0]
+            
+        return feats, pd.DataFrame({"num_feats": num_feats, "val_loss": losses, f"val_{val_score_name}": scores})
+            
+        
+        
+        
+        # if partialed_feats is not None:
+        #     partialed_indices = [X.columns.get_loc(feat) for feat in partialed_feats]
+        # else:
+        #     partialed_indices = None
+        
+        # self.feature_names_in_ = X.columns
+        
+        # # First discretize the data
+        # X_discrete = self._discretize_data(X)
+        
+        # if hasattr(X, 'values'):
+        #     X_discrete = X_discrete.values
+        
+        # # Make one train/val split for feature selection
+        # X_train, X_val, y_train, y_val = train_test_split(X_discrete, y, test_size=self.validation_size)
+        
+        # # Get data loaders
+        # train_loader = self.get_data_loader(X_train, y_train)
+        # val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
+        
+        # model = _BaseSingleSplitDNAMiteModel(
+        #     n_features=self.n_features, 
+        #     n_output=self.n_output,
+        #     feature_sizes=self.feature_sizes, 
+        #     n_embed=self.n_embed,
+        #     n_hidden=self.n_hidden, 
+        #     n_layers=self.n_layers,
+        #     gamma=self.gamma, 
+        #     pair_gamma=self.pair_gamma,
+        #     reg_param=self.reg_param, 
+        #     pair_reg_param=self.pair_reg_param, 
+        #     entropy_param=self.entropy_param, 
+        #     device=self.device, 
+        #     kernel_size=self.kernel_size,
+        #     kernel_weight=self.kernel_weight,
+        #     pair_kernel_size=self.pair_kernel_size,
+        #     pair_kernel_weight=self.pair_kernel_weight,
+        #     save_dir=self.save_dir,
+        #     cat_feat_mask=self.cat_feat_mask,
+        #     monotone_constraints=self.monotone_constraints
+        # ).to(self.device)
+
+        # optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+        
+        # if partialed_indices is not None:
+        #     # print("TRAINING ON PARTIALED FEATS")
+            
+        #     model.active_feats = torch.tensor(partialed_indices).to(self.device)
+        #     reg_param = model.reg_param
+        #     entropy_param = model.entropy_param
+        #     penalized = model.penalized
+        #     model.reg_param = 0
+        #     model.entropy_param = 0
+        #     model.penalized = False
+            
+        #     # Get data loaders only for partialed feats
+        #     train_loader = self.get_data_loader(X_train[:, partialed_indices], y_train)
+        #     val_loader = self.get_data_loader(X_val[:, partialed_indices], y_val, shuffle=False)
+            
+        #     model.train_(
+        #         partial(self.train_epoch_mains, on_partialed_set=True), 
+        #         partial(self.test_epoch_mains, on_partialed_set=True), 
+        #         train_loader, 
+        #         val_loader, 
+        #         optimizer, 
+        #         self.max_epochs,
+        #         mains=True,
+        #         verbose=True,
+        #         show_feat_count=True
+        #     )
+            
+        #     model.active_feats = torch.arange(X.shape[1]).to(self.device)
+        #     model.reg_param = reg_param
+        #     model.entropy_param = entropy_param
+        #     model.penalized = penalized
+            
+        #     # Go back to full loaders
+        #     train_loader = self.get_data_loader(X_train, y_train)
+        #     val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
+        
+        # model.reg_param = init_reg_param
+        
+        # n_feat_selected = np.inf
+        # scores = []
+        # num_feats = []
+        # feats = []
+        # while n_feat_selected > 0:
+        #     print("REG PARAM", model.reg_param)
+        
+        #     model.train_(
+        #         partial(self.train_epoch_mains, partialed_indices=partialed_indices), 
+        #         self.test_epoch_mains, 
+        #         train_loader, 
+        #         val_loader, 
+        #         optimizer, 
+        #         self.max_epochs,
+        #         mains=True,
+        #         verbose=True,
+        #         show_feat_count=True
+        #     )
+            
+        #     # print("Number of main features selected: ", len(model.active_feats))
+            
+        #     _, val_preds = self.test_epoch_mains(model, val_loader)
+            
+        #     score = self._score_from_preds(val_preds.detach().cpu().numpy(), y_val, y_train)
+        #     scores.append(score)
+            
+        #     n_feat_selected = len(model.active_feats)
+        #     num_feats.append(n_feat_selected)
+            
+        #     feats.append(self.feature_names_in_[model.active_feats.cpu().numpy()].tolist())
+        #     model.reg_param = model.reg_param * 2
+            
+        
+        # return scores, num_feats, feats
+    
+    def select_pairs(self, model, X_train, y_train, X_val, y_val, num_pairs=10):
+        """
+        Select only pairs for a model that uses all features.
+        
+        
+        Parameters
+        ----------
+        model : _BaseSingleSplitDNAMiteModel
+            A single split DNAMite model that has already been trained on individual features.
+        
+        X_train : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        
+        y_train : pandas.Series or numpy.ndarray, shape (n_samples,)
+        
+        X_val : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        
+        y_val : pandas.Series or numpy.ndarray, shape (n_samples,)
+        
+        num_pairs : int, default=10
+            The number of pairs to select.
+        """
+        
+        # Set random seed if one is provided
+        if self.random_state is not None:
+            torch.manual_seed(self.random_state)
+            np.random.seed(self.random_state)
+        
+        pair_reg_param = 0.01
+        pair_gamma = min(((X_train.shape[0] / self.batch_size) / 250) / (self.n_hidden / 16), 1.0)
+        
+        self.logger.debug("SELECTING PAIRS")
+        self.logger.debug(f"WITH PAIR REG PARAM: {pair_reg_param}")
+        
+        pairs_list = list(combinations(range(X_train.shape[1]), 2))
+        
+        pair_scores = self._score_pairs(
+            model, X_train, y_train, X_val, y_val, pair_reg_param, pair_gamma
+        )
+        
+        # Check number of non-zeros in pair scores
+        while np.sum(pair_scores > 0) < num_pairs:
+            pair_reg_param /= 2
+            self.logger.debug(f"CHANGING PAIR REG PARAM TO {pair_reg_param}")
+            pair_scores = self._score_pairs(
+                model, X_train, y_train, X_val, y_val, pair_reg_param, pair_gamma
+            )
+        
+        # Select the pairs with the largest k scores
+        top_pairs = np.argsort(pair_scores)[::-1][:num_pairs]
+        
+        self.pairs_list = [pairs_list[i] for i in top_pairs]
+        
+        self.selected_pairs = [
+            [self.feature_names_in_[pair[0]], self.feature_names_in_[pair[1]]]
+            for pair in self.pairs_list
+        ]
         
         return
+        
+    def _score_pairs(self, model, X_train, y_train, X_val, y_val, pair_reg_param, pair_gamma):
+        
+        model = copy.deepcopy(model)
+        
+        model.freeze_main_effects()
+        
+        # Set parameters so that pairs will be regularized
+        model.penalized = True
+        model.pair_reg_param = pair_reg_param
+        model.pair_gamma = pair_gamma
+        
+        # Start initially with all pairs
+        pairs_list = list(combinations(range(X_train.shape[1]), 2))
+        
+        X_train_interactions = X_train.values[:, pairs_list]
+        X_val_interactions = X_val.values[:, pairs_list]
+        
+        train_loader = self.get_data_loader(X_train, y_train, pairs=X_train_interactions)
+        val_loader = self.get_data_loader(X_val, y_val, pairs=X_val_interactions, shuffle=False)
+        
+        optimizer = torch.optim.Adam(
+            [p for p in model.parameters() if p.requires_grad], 
+            lr=self.learning_rate / 5
+        )
+        
+        model.train_(
+            self.train_epoch_pairs, 
+            self.test_epoch_pairs, 
+            train_loader, 
+            val_loader, 
+            optimizer, 
+            self.max_epochs,
+            mains=False,
+            # verbose=True,
+            # show_pair_count=True
+        )
+        
+        # Get the pair scores
+        pair_scores = model.get_smooth_z_pairs().detach().cpu().numpy()
+        
+        return pair_scores
     
     def fit(self, X, y, partialed_feats=None):
         """
@@ -1448,6 +1819,13 @@ class BaseDNAMiteModel(nn.Module):
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
         """
+        self.logger.debug("STARTING FIT...")
+        
+        if hasattr(self, 'selected_feats'):
+            if hasattr(self, 'selected_pairs') and self.fit_pairs:
+                self.logger.warning("Found selected features and pairs. Using only those features and pairs.")
+            else:
+                self.logger.warning("Found selected features. Using only those features.")
         
         if partialed_feats is not None:
             partialed_indices = [X.columns.get_loc(feat) for feat in partialed_feats]
@@ -1460,34 +1838,58 @@ class BaseDNAMiteModel(nn.Module):
         X_discrete = self._discretize_data(X)
         
         # Fit several models, one for each validation split
-        self.models = []
         for i in range(self.n_val_splits):
-            print("SPlIT", i)
-        
+            self.logger.info(f"SPlIT: {i}")
+
             # Split the data into training and validation
-            X_train, X_val, y_train, y_val = train_test_split(X_discrete, y, test_size=self.validation_size)
+            X_train, X_val, y_train, y_val = train_test_split(X_discrete, y, test_size=self.validation_size, random_state=self.random_state+i)
             
             # Fit to this split
-            model = self._fit_one_split(X_train, y_train, X_val, y_val, partialed_indices=partialed_indices)
-            # model.feature_bins = self.feature_bins
-            
-            # # Compute the bin counts
-            # model.bin_counts = [
-            #     get_bin_counts(X_train[col], nb) for col, nb in zip(X_train.columns, self.feature_sizes)
-            # ]
-            
-            # if self.fit_pairs:
-            #     pairs_list = model.pairs_list.cpu().numpy()
-            #     model.pair_bin_counts = [
-            #         get_pair_bin_counts(X_train.iloc[:, col1], X_train.iloc[:, col2]) 
-            #         for col1, col2 in pairs_list
-            #     ]
+            model = self._fit_one_split(X_train, y_train, X_val, y_val, random_state=self.random_state+i, partialed_indices=partialed_indices)
             
             self.models.append(model)
             
         self._compute_bin_scores()
             
         return
+    
+    def _predict(self, X_test_discrete, models):
+        self.logger.debug("STARTING _PREDICT...")
+        
+        # # If selected_feats is set, only use those features
+        # if hasattr(self, 'selected_feats'):
+        #     X_test_discrete = X_test_discrete[self.selected_feats]
+        
+        if hasattr(self, 'selected_feats'):
+            if self.fit_pairs:
+                pairs_list = [
+                    [X_test_discrete.columns.get_loc(feat1), X_test_discrete.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs
+                ]    
+        elif self.fit_pairs:
+            pairs_list = self.pairs_list
+            
+        # Make placeholder y_test
+        y_test = np.zeros(X_test_discrete.shape[0])
+        
+        self.logger.debug("GETTING THE TEST PREDICTIONS")
+        if not self.fit_pairs:
+            test_loader = self.get_data_loader(X_test_discrete, y_test, shuffle=False)
+            test_preds = np.zeros((len(models), X_test_discrete.shape[0]))
+            for i, model in enumerate(models):
+                _, model_preds = self.test_epoch_mains(model, test_loader)
+                test_preds[i, ...] = model_preds.cpu().numpy()
+        
+        else:
+            X_test_interactions = X_test_discrete.values[:, pairs_list]
+            test_loader = self.get_data_loader(X_test_discrete, y_test, pairs=X_test_interactions, shuffle=False)
+            
+            test_preds = np.zeros((len(models), X_test_discrete.shape[0]))
+            for i, model in enumerate(models):
+                _, model_preds = self.test_epoch_pairs(model, test_loader)
+                test_preds[i, ...] = model_preds.cpu().numpy()
+            
+        return np.mean(test_preds, axis=0)
+        
     
     def predict(self, X_test):
         """
@@ -1499,48 +1901,30 @@ class BaseDNAMiteModel(nn.Module):
             The input features for prediction.
         
         """
-        
         X_test_discrete = self._discretize_data(X_test)
-        
-        # # If selected_feats is set, only use those features
-        # if hasattr(self, 'selected_feats'):
-        #     X_test_discrete = X_test_discrete[self.selected_feats]
-            
-        # Make placeholder y_test
-        y_test = np.zeros(X_test_discrete.shape[0])
-        
+                
         if hasattr(self, 'selected_feats'):
-            print("Found selected features. Using only those features.")
+            self.logger.debug("Found selected features. Using only those features.")
+            print("SELECTED FEATS", len(self.selected_feats))
+            print("X TEST DISCRETE", X_test_discrete.shape)
             X_test_discrete = X_test_discrete[self.selected_feats]
-            
-            if self.fit_pairs:
-                pairs_list = [
-                    [X_test_discrete.columns.get_loc(feat1), X_test_discrete.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs
-                ]    
-        elif self.fit_pairs:
-            pairs_list = self.pairs_list
-            
-        if not self.fit_pairs:
-            test_loader = self.get_data_loader(X_test_discrete, y_test, shuffle=False)
-            test_preds = np.zeros((self.n_val_splits, X_test.shape[0]))
-            for i, model in enumerate(self.models):
-                _, model_preds = self.test_epoch_mains(model, test_loader)
-                test_preds[i, ...] = model_preds.cpu().numpy()
         
-        else:
-            X_test_interactions = X_test_discrete.values[:, pairs_list]
-            test_loader = self.get_data_loader(X_test_discrete, y_test, pairs=X_test_interactions, shuffle=False)
-            
-            test_preds = np.zeros((self.n_val_splits, X_test.shape[0]))
-            for i, model in enumerate(self.models):
-                _, model_preds = self.test_epoch_pairs(model, test_loader)
-                test_preds[i, ...] = model_preds.cpu().numpy()
-            
-        return np.mean(test_preds, axis=0)
+        return self._predict(X_test_discrete, self.models)
     
-    def get_feature_importances(self):
+    def score(self, X, y, y_train=None):
+        raise NotImplementedError("Scoring is only implemented for child classes.")
+    
+    def _score_from_preds(self, y_preds, y, y_train=None):
+        raise NotImplementedError("Scoring is only implemented for child classes.")
+    
+    def get_feature_importances(self, missing_bin="include"):
         """
         Get the feature importance scores for all features in the model.
+        
+        Parameters
+        ----------
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing the importance scores.
             
         Returns
         -------
@@ -1553,24 +1937,44 @@ class BaseDNAMiteModel(nn.Module):
             
             for i, col in enumerate(model.feature_names_in_):
                 feat_bin_scores = model.bin_scores[i].squeeze()
+                bin_counts = model.bin_counts[i]
                 
-                feat_importance = np.sum(np.abs(feat_bin_scores) * np.array(model.bin_counts[i])) / np.sum(model.bin_counts[i])
-                    
-                importances.append([split, col, feat_importance, len(feat_bin_scores)])
+                if missing_bin != "include" and self.has_missing_bin[i]:
+                    missing_bin_score = feat_bin_scores[0]
+                    feat_bin_scores = feat_bin_scores[1:]
+                    bin_counts = bin_counts[1:]
+                
+                feat_importance = np.sum(np.abs(feat_bin_scores) * np.array(bin_counts)) / np.sum(bin_counts)
+                
+                if missing_bin == "stratify":
+                    if self.has_missing_bin[i]:
+                        missing_importance = np.abs(missing_bin_score)
+                    else:
+                        missing_importance = np.nan
+                    importances.append([split, col, feat_importance, "observed", len(feat_bin_scores)])
+                    importances.append([split, col, missing_importance, "missing", 1])
+                else:
+                    importances.append([split, col, feat_importance, len(feat_bin_scores)])
             
             if model.fit_pairs:
                 pairs_list = model.pairs_list.cpu().numpy()
                 for i, pair in enumerate(pairs_list):
+                    # To do: incorporate ignore missing bin here
                     pair_bin_scores = model.pair_bin_scores[i].squeeze()
-                
                     pair_importance = np.sum(np.abs(pair_bin_scores) * np.array(model.pair_bin_counts[i])) / np.sum(model.pair_bin_counts[i])
                     
-                    importances.append([split, f"{model.feature_names_in_[pair[0]]} || {model.feature_names_in_[pair[1]]}", pair_importance, len(pair_bin_scores)])
-            
-        self.importances = pd.DataFrame(importances, columns=["split", "feature", "importance", "n_bins"])
+                    if missing_bin == "stratify":
+                        importances.append([split, f"{model.feature_names_in_[pair[0]]} || {model.feature_names_in_[pair[1]]}", pair_importance, "observed", len(pair_bin_scores)])
+                    else:
+                        importances.append([split, f"{model.feature_names_in_[pair[0]]} || {model.feature_names_in_[pair[1]]}", pair_importance, len(pair_bin_scores)])
+        
+        if missing_bin == "stratify":
+            self.importances = pd.DataFrame(importances, columns=["split", "feature", "importance", "bin_type", "n_bins"])
+        else:
+            self.importances = pd.DataFrame(importances, columns=["split", "feature", "importance", "n_bins"])
         return self.importances
     
-    def plot_feature_importances(self, k=10):
+    def plot_feature_importances(self, k=10, missing_bin="include"):
         """
         Plot a bar plot with the importance score for the top k features.
         
@@ -1578,18 +1982,74 @@ class BaseDNAMiteModel(nn.Module):
         ----------
         k : int, default=10
             Number of features to plot.
+            
+        missing_bin : str, default="include"
+            How to handle missing bin when calculating feature importances
+            "include" - include the missing bin.
+            "ignore" - ignore the missing bin.
+            "stratify" - calculate separate importances for missing and non-missing bins.
         """
         
-        plt.figure(figsize=(6, 4))
-
-        feat_imps = self.get_feature_importances()
+        plt.figure(figsize=(8 if missing_bin == "stratify" else 6, 4))
         
-        top_k_features = feat_imps.groupby("feature")["importance"].agg(["mean", "sem"])
-        top_k_features = top_k_features.sort_values("mean", ascending=True).tail(k)
+        feat_imps = self.get_feature_importances(missing_bin=missing_bin)
 
-        plt.barh(top_k_features.index, top_k_features["mean"], xerr=1.96*top_k_features["sem"])
+        if missing_bin == "stratify":
+            # feat_means = feat_imps.groupby(["feature", "bin_type"])["importance"].mean().reset_index()
+            # feat_means = feat_means.pivot(index="feature", columns="bin_type", values="importance").reset_index()
+            # feat_means = feat_means.sort_values(by="observed", ascending=False).head(10)
+            # feat_means["missing"] = feat_means["missing"] * -1
+            # feat_means = feat_means.melt(id_vars="feature", value_vars=["observed", "missing"], 
+            #                             var_name="bin_type", value_name='importance')
 
-        # plt.tight_layout()
+            # feat_sems = feat_imps.groupby(["feature", "bin_type"])["importance"].agg(["sem"]).reset_index()
+            # feat_imps = feat_means.merge(feat_sems, on=["feature", "bin_type"])
+            # sns.barplot(
+            #     x="importance",
+            #     y="feature",
+            #     hue="bin_type",
+            #     data=feat_imps,
+            #     xerr=1.96 * feat_imps["sem"].values.reshape(2, -1),
+            #     orient="h"
+            # )
+            feat_means = feat_imps.groupby(["feature", "bin_type"])["importance"].mean().reset_index()
+            feat_means = feat_means.pivot(index="feature", columns="bin_type", values="importance").reset_index()
+            feat_means = feat_means.sort_values(by="observed", ascending=True).tail(10)
+            # feat_means = feat_means.melt(id_vars="feature", value_vars=["observed", "missing"], 
+            #                               var_name="bin_type", value_name='importance')
+
+            feat_sems = feat_imps.groupby(["feature", "bin_type"])["importance"].agg(["sem"]).reset_index()
+            feat_sems = feat_sems.pivot(index="feature", columns="bin_type", values="sem").reset_index()
+            feat_imps = feat_means.merge(feat_sems, on="feature", suffixes=("", "_sem"))
+            plt.barh(
+                y=feat_imps["feature"],
+                width=feat_imps["observed"],
+                xerr=1.96 * feat_imps["observed_sem"],
+            )
+            plt.barh(
+                y=feat_imps["feature"],
+                width=-1*feat_imps["missing"],
+                xerr=1.96 * feat_imps["missing_sem"],
+                color=sns.color_palette()[1]
+            )
+            plt.ylabel("")
+
+            # Change title of legend
+            # plt.legend(title="Importance Type")
+            
+            # Add legend
+            plt.legend(["Observed", "Missing"], title="Importance Type")
+            
+        else:
+        
+            top_k_features = feat_imps.groupby("feature")["importance"].agg(["mean", "sem"])
+            top_k_features = top_k_features.sort_values("mean", ascending=True).tail(k)
+
+            plt.barh(top_k_features.index, top_k_features["mean"], xerr=1.96*top_k_features["sem"])
+            
+        plt.xlabel("Importance")
+        plt.title(f"Feature Importances ({missing_bin})")
+        plt.tight_layout()
     
     def get_shape_function(self, feature_name):
         """
@@ -1641,7 +2101,7 @@ class BaseDNAMiteModel(nn.Module):
             
         return df.reset_index()
     
-    def plot_shape_function(self, feature_names, plot_missing_bin=False):
+    def plot_shape_function(self, feature_names, plot_missing_bin=False, yaxis_label="Contribution", axes=None):
         """
         Plot the shape function for given feature(s).
         
@@ -1662,23 +2122,24 @@ class BaseDNAMiteModel(nn.Module):
         
         num_axes = sum([2 if not c and plot_missing_bin else 1 for _, c in zip(feature_names, is_cat_cols)])
         
-        if plot_missing_bin:
-        
-            fig = plt.figure(figsize=(4*num_axes, 4))
+        if axes is None:
+            if plot_missing_bin:
             
-            gs = gridspec.GridSpec(1, 2*len(feature_names) + len(feature_names)-1, width_ratios=[10, 1, 2] * (len(feature_names)-1) + [10, 1])  # Add an extra column for the space
-            def generate_indices(n_times):
-                indices = []
-                for i in range(n_times):
-                    indices.extend([i*3, i*3+1])
-                return indices
+                fig = plt.figure(figsize=(4*num_axes, 4))
+                
+                gs = gridspec.GridSpec(1, 2*len(feature_names) + len(feature_names)-1, width_ratios=[10, 1, 2] * (len(feature_names)-1) + [10, 1])  # Add an extra column for the space
+                def generate_indices(n_times):
+                    indices = []
+                    for i in range(n_times):
+                        indices.extend([i*3, i*3+1])
+                    return indices
 
-            axes = [fig.add_subplot(gs[i]) for i in generate_indices(len(feature_names))]
-            
-        else:
-            fig, axes = plt.subplots(1, num_axes, figsize=(4*num_axes, 4))
-            if num_axes == 1:
-                axes = [axes]
+                axes = [fig.add_subplot(gs[i]) for i in generate_indices(len(feature_names))]
+                
+            else:
+                fig, axes = plt.subplots(1, num_axes, figsize=(4*num_axes, 4))
+                if num_axes == 1:
+                    axes = [axes]
         
         ax_idx = 0
         
@@ -1698,7 +2159,10 @@ class BaseDNAMiteModel(nn.Module):
                         step='post'
                     )
                     axes[ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
-                    axes[ax_idx].set_ylabel("")
+                    if ax_idx == 0:
+                        axes[ax_idx].set_ylabel(yaxis_label)
+                    else:
+                        axes[ax_idx].set_ylabel("")
                     ax_idx += 1
                 else:
                         
@@ -1713,7 +2177,10 @@ class BaseDNAMiteModel(nn.Module):
                         step='post'
                     )
                     axes[ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
-                    axes[ax_idx].set_ylabel("")
+                    if ax_idx == 0:
+                        axes[ax_idx].set_ylabel(yaxis_label)
+                    else:
+                        axes[ax_idx].set_ylabel("")
                     
                     ax_idx += 1
 
@@ -1728,10 +2195,15 @@ class BaseDNAMiteModel(nn.Module):
                     ax_idx += 1
                     
             else:
-                sns.barplot(x="bin", y="score", data=shape_data, ci=95, ax=axes[ax_idx])
+                sns.barplot(x="bin", y="score", data=shape_data, errorbar=('ci', 95), ax=axes[ax_idx])
+                axes[ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
                 axes[ax_idx].tick_params(axis='x', rotation=45)
                 for label in axes[ax_idx].get_xticklabels():
                     label.set_ha('right')
+                if ax_idx == 0:
+                    axes[ax_idx].set_ylabel(yaxis_label)
+                else:
+                    axes[ax_idx].set_ylabel("")
                 ax_idx += 1
                 
         plt.tight_layout()
@@ -1861,6 +2333,9 @@ class BaseDNAMiteModel(nn.Module):
         sns.heatmap(pair_data_dnamite)
         
         plt.tight_layout()
+        
+    def score(self, X, y):
+        raise NotImplementedError("Scoring is implemented for base class.")
       
 class DNAMiteRegressor(BaseDNAMiteModel):
     """
@@ -1910,6 +2385,13 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         The monotonic constraints for the features.
         0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
         None means no constraints.
+    num_pairs : int, default=10
+        Number of pairwise interactions to use in the model.
+    verbosity : int, default=0
+        Level of verbosity for logging.
+        0: Warning, 1: Info, 2: Debug
+    random_state : int, optional
+        Random seed for reproducibility.
     """
     
     def __init__(self,
@@ -1925,7 +2407,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
                  device="cpu", 
                  fit_pairs=True, 
                  pairs_list=None,
-                 gamma=1,
+                 gamma=None,
                  pair_gamma=None,
                  reg_param=0, 
                  pair_reg_param=0, 
@@ -1935,7 +2417,10 @@ class DNAMiteRegressor(BaseDNAMiteModel):
                  pair_kernel_size=3, 
                  pair_kernel_weight=1, 
                  save_dir=None,
-                 monotone_constraints=None
+                 monotone_constraints=None,
+                 num_pairs=10,
+                 verbosity=0,
+                 random_state=None
     ):
         super().__init__(
             n_features=n_features,
@@ -1961,7 +2446,10 @@ class DNAMiteRegressor(BaseDNAMiteModel):
             pair_kernel_size=pair_kernel_size,
             pair_kernel_weight=pair_kernel_weight,
             save_dir=save_dir, 
-            monotone_constraints=monotone_constraints
+            monotone_constraints=monotone_constraints,
+            num_pairs=num_pairs,
+            verbosity=verbosity,
+            random_state=random_state
         )
 
             
@@ -1999,14 +2487,14 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         active_feats = model.active_feats
         y_pred_init = 0
 
-        for X_main, labels in tqdm(train_loader, leave=False):
+        for X_main, labels in train_loader:
 
             X_main, labels = X_main.to(self.device), labels.to(self.device)
 
             if partialed_indices is not None:
                 with torch.no_grad():
                     model.active_feats = torch.tensor(partialed_indices).to(self.device)
-                    y_pred_init = model(mains=X_main)
+                    y_pred_init = model(mains=X_main).squeeze(-1)
                     
                     # Reset active_feats
                     model.active_feats = torch.tensor([i for i in active_feats if i not in partialed_indices]).to(self.device)
@@ -2033,7 +2521,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         preds = []
         
         with torch.no_grad():
-            for X_main, labels in tqdm(test_loader, leave=False):
+            for X_main, labels in test_loader:
 
                 X_main, labels = X_main.to(self.device), labels.to(self.device)
 
@@ -2054,7 +2542,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         model.train()
         total_loss = 0
 
-        for X_main, X_pairs, labels in tqdm(train_loader, leave=False):
+        for X_main, X_pairs, labels in train_loader:
 
             X_main, X_pairs, labels = X_main.to(self.device), X_pairs.to(self.device), labels.to(self.device)
 
@@ -2084,7 +2572,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         preds = []
         
         with torch.no_grad():
-            for X_main, X_pairs, labels in tqdm(test_loader, leave=False):
+            for X_main, X_pairs, labels in test_loader:
 
                 X_main, X_pairs, labels = X_main.to(self.device), X_pairs.to(self.device), labels.to(self.device)
 
@@ -2123,9 +2611,14 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         """
         return super().fit(X, y, partialed_feats=partialed_feats)
     
-    def get_feature_importances(self):
+    def get_feature_importances(self, missing_bin="include"):
         """
         Get the feature importance scores for all features in the model.
+        
+        Parameters
+        ----------
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing the importance scores.
             
         Returns
         -------
@@ -2133,7 +2626,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
             A DataFrame containing the feature importance scores for each feature.
         """
         
-        return super().get_feature_importances()
+        return super().get_feature_importances(missing_bin=missing_bin)
     
     def get_pair_shape_function(self, feat1_name, feat2_name):
         """
@@ -2172,7 +2665,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         
         return super().get_shape_function(feature_name)
     
-    def plot_feature_importances(self, k=10):
+    def plot_feature_importances(self, k=10, missing_bin="include"):
         """
         Plot a bar plot with the importance score for the top k features.
         
@@ -2180,9 +2673,12 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         ----------
         k : int, default=10
             Number of features to plot.
+            
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing the importance scores.
         """
         
-        return super().plot_feature_importances(k)
+        return super().plot_feature_importances(k, missing_bin)
     
     def plot_pair_shape_function(self, feat1_name, feat2_name):
         """
@@ -2200,7 +2696,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         
         return super().plot_pair_shape_function(feat1_name, feat2_name)
     
-    def plot_shape_function(self, feature_names, plot_missing_bin=False):
+    def plot_shape_function(self, feature_names, plot_missing_bin=False, axes=None):
         """
         Plot the shape function for given feature(s).
         
@@ -2214,7 +2710,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
             Only applicable for continuous features.
         """
         
-        return super().plot_shape_function(feature_names, plot_missing_bin)
+        return super().plot_shape_function(feature_names, plot_missing_bin, yaxis_label="Contribution to Prediction", axes=axes)
     
     def predict(self, X_test):
         """
@@ -2247,6 +2743,38 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         """
         
         return super().select_features(X, y, partialed_feats)
+    
+    def score(self, X, y, y_train=None, model=None):
+        """
+        Compute the RMSE score for the model on the provided data.
+        
+        Parameters
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for the model.
+            
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The labels, should be floats in (-inf, inf).
+        """
+        from sklearn.metrics import root_mean_squared_error
+        preds = self._predict(X, models=[model])
+                
+        return {"RMSE": root_mean_squared_error(y, preds)}
+    
+    def _score_from_preds(self, y_preds, y, y_train=None):
+        """
+        Compute the RMSE score from predictions.
+        
+        Parameters
+        ----------
+        y_preds : numpy.ndarray, shape (n_samples,)
+            The predicted labels.
+            
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The true labels.
+        """
+        from sklearn.metrics import root_mean_squared_error
+        return root_mean_squared_error(y, y_preds)
 
 class DNAMiteBinaryClassifier(BaseDNAMiteModel):
     """
@@ -2296,6 +2824,13 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         The monotonic constraints for the features.
         0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
         None means no constraints.
+    num_pairs : int, default=10
+        Number of pairwise interactions to use in the model.
+    verbosity : int, default=0
+        Level of verbosity for logging.
+        0: Warning, 1: Info, 2: Debug
+    random_state : int, optional
+        Random seed for reproducibility.
     """
     
     
@@ -2312,7 +2847,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
                  device="cpu", 
                  fit_pairs=True, 
                  pairs_list=None,
-                 gamma=1,
+                 gamma=None,
                  pair_gamma=None,
                  reg_param=0, 
                  pair_reg_param=0, 
@@ -2322,7 +2857,10 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
                  pair_kernel_size=3, 
                  pair_kernel_weight=1, 
                  save_dir=None,
-                 monotone_constraints=None
+                 monotone_constraints=None,
+                 num_pairs=10,
+                 verbosity=0,
+                 random_state=None
     ):
         super().__init__(
             n_features=n_features,
@@ -2348,7 +2886,10 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             pair_kernel_size=pair_kernel_size,
             pair_kernel_weight=pair_kernel_weight,
             save_dir=save_dir, 
-            monotone_constraints=monotone_constraints
+            monotone_constraints=monotone_constraints,
+            num_pairs=num_pairs,
+            verbosity=verbosity,
+            random_state=random_state
         )
             
         
@@ -2385,14 +2926,14 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         active_feats = model.active_feats
         y_pred_init = 0
 
-        for X_main, labels in tqdm(train_loader, leave=False):
+        for X_main, labels in train_loader:
 
             X_main, labels = X_main.to(self.device), labels.to(self.device)
             
             if partialed_indices is not None:
                 with torch.no_grad():
                     model.active_feats = torch.tensor(partialed_indices).to(self.device)
-                    y_pred_init = model(mains=X_main)
+                    y_pred_init = model(mains=X_main).squeeze(-1)
                     
                     # Reset active_feats
                     model.active_feats = torch.tensor([i for i in active_feats if i not in partialed_indices]).to(self.device)
@@ -2419,7 +2960,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         preds = []
         
         with torch.no_grad():
-            for X_main, labels in tqdm(test_loader, leave=False):
+            for X_main, labels in test_loader:
 
                 X_main, labels = X_main.to(self.device), labels.to(self.device)
 
@@ -2440,7 +2981,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         model.train()
         total_loss = 0
 
-        for X_main, X_pairs, labels in tqdm(train_loader, leave=False):
+        for X_main, X_pairs, labels in train_loader:
 
             X_main, X_pairs, labels = X_main.to(self.device), X_pairs.to(self.device), labels.to(self.device)
 
@@ -2470,7 +3011,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         preds = []
         
         with torch.no_grad():
-            for X_main, X_pairs, labels in tqdm(test_loader, leave=False):
+            for X_main, X_pairs, labels in test_loader:
 
                 X_main, X_pairs, labels = X_main.to(self.device), X_pairs.to(self.device), labels.to(self.device)
 
@@ -2509,7 +3050,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         """
         return super().fit(X, y, partialed_feats=partialed_feats)
     
-    def get_feature_importances(self):
+    def get_feature_importances(self, missing_bin="include"):
         """
         Get the feature importance scores for all features in the model.
         
@@ -2526,7 +3067,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             A DataFrame containing the feature importance scores for each feature.
         """
         
-        return super().get_feature_importances()
+        return super().get_feature_importances(missing_bin=missing_bin)
     
     def get_pair_shape_function(self, feat1_name, feat2_name):
         """
@@ -2565,7 +3106,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         
         return super().get_shape_function(feature_name)
     
-    def plot_feature_importances(self, k=10):
+    def plot_feature_importances(self, k=10, missing_bin="include"):
         """
         Plot a bar plot with the importance score for the top k features.
         
@@ -2575,7 +3116,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             Number of features to plot.
         """
         
-        return super().plot_feature_importances(k)
+        return super().plot_feature_importances(k, missing_bin=missing_bin)
     
     def plot_pair_shape_function(self, feat1_name, feat2_name):
         """
@@ -2593,7 +3134,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         
         return super().plot_pair_shape_function(feat1_name, feat2_name)
     
-    def plot_shape_function(self, feature_names, plot_missing_bin=False):
+    def plot_shape_function(self, feature_names, plot_missing_bin=False, axes=None):
         """
         Plot the shape function for given feature(s).
         
@@ -2607,7 +3148,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             Only applicable for continuous features.
         """
         
-        return super().plot_shape_function(feature_names, plot_missing_bin)
+        return super().plot_shape_function(feature_names, plot_missing_bin, yaxis_label=r"Contribution to $\log(\frac{p}{1-p})$", axes=axes)
     
     def predict(self, X_test):
         """
@@ -2654,6 +3195,40 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         """
         
         return super().select_features(X, y, partialed_feats)
+    
+    def score(self, X, y, y_train=None, model=None):
+        """
+        Compute the AUC for the model on the provided data.
+        
+        Parameters
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for the model.
+            
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The labels, should be label encoded as 0 and 1.
+        """
+        from sklearn.metrics import roc_auc_score
+        preds = self._predict(X, models=[model])
+        preds = 1 / (1 + np.exp(-preds))
+        
+        return {"AUC": roc_auc_score(y, preds)}
+    
+    def _score_from_preds(self, y_preds, y, y_train=None):
+        """
+        Compute the AUC score from predictions.
+        
+        Parameters
+        ----------
+        y_preds : numpy.ndarray, shape (n_samples,)
+            The predicted labels.
+            
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The true labels.
+        """
+        from sklearn.metrics import roc_auc_score
+        prob_preds = 1 / (1 + np.exp(-y_preds))
+        return roc_auc_score(y, prob_preds)
     
 
 class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
@@ -2706,6 +3281,13 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         The monotonic constraints for the features.
         0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
         None means no constraints.
+    num_pairs : int, default=10
+        Number of pairwise interactions to use in the model.
+    verbosity : int, default=0
+        Level of verbosity for logging.
+        0: Warning, 1: Info, 2: Debug
+    random_state : int, optional
+        Random seed for reproducibility.
     """
     
     def __init__(self,
@@ -2722,7 +3304,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
                  device="cpu", 
                  fit_pairs=True, 
                  pairs_list=None,
-                 gamma=1,
+                 gamma=None,
                  pair_gamma=None,
                  reg_param=0, 
                  pair_reg_param=0, 
@@ -2732,7 +3314,10 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
                  pair_kernel_size=3, 
                  pair_kernel_weight=1, 
                  save_dir=None,
-                 monotone_constraints=None
+                 monotone_constraints=None,
+                 num_pairs=10,
+                 verbosity=0,
+                 random_state=None
     ):
         super().__init__(
             n_features=n_features,
@@ -2758,7 +3343,10 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             pair_kernel_size=pair_kernel_size,
             pair_kernel_weight=pair_kernel_weight,
             save_dir=save_dir, 
-            monotone_constraints=monotone_constraints
+            monotone_constraints=monotone_constraints,
+            num_pairs=num_pairs,
+            verbosity=verbosity,
+            random_state=random_state
         )
             
         
@@ -2795,7 +3383,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         active_feats = model.active_feats
         y_pred_init = 0
 
-        for X_main, labels in tqdm(train_loader, leave=False):
+        for X_main, labels in train_loader:
 
             X_main, labels = X_main.to(self.device), labels.to(self.device)
             
@@ -2829,7 +3417,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         preds = []
         
         with torch.no_grad():
-            for X_main, labels in tqdm(test_loader, leave=False):
+            for X_main, labels in test_loader:
 
                 X_main, labels = X_main.to(self.device), labels.to(self.device)
 
@@ -2850,7 +3438,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         model.train()
         total_loss = 0
 
-        for X_main, X_pairs, labels in tqdm(train_loader, leave=False):
+        for X_main, X_pairs, labels in train_loader:
 
             X_main, X_pairs, labels = X_main.to(self.device), X_pairs.to(self.device), labels.to(self.device)
 
@@ -2880,7 +3468,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         preds = []
         
         with torch.no_grad():
-            for X_main, X_pairs, labels in tqdm(test_loader, leave=False):
+            for X_main, X_pairs, labels in test_loader:
 
                 X_main, X_pairs, labels = X_main.to(self.device), X_pairs.to(self.device), labels.to(self.device)
 
@@ -2901,7 +3489,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         return total_loss / len(test_loader), torch.cat(preds)
     
     
-    def get_feature_importances(self):
+    def get_feature_importances(self, ignore_missing_bin=False):
         
         importances = []
         for i, model in enumerate(self.models):
@@ -2911,8 +3499,13 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             importances = []
             for i, col in enumerate(model.feature_names_in_):
                 feat_bin_scores = model.bin_scores[i].sum(axis=-1)
+                bin_counts = model.bin_counts[i]
                 
-                feat_importance = np.sum(np.abs(feat_bin_scores) * np.array(model.bin_counts[i])) / np.sum(model.bin_counts[i])
+                if ignore_missing_bin:
+                    feat_bin_scores = feat_bin_scores[1:]
+                    bin_counts = bin_counts[1:]
+                
+                feat_importance = np.sum(np.abs(feat_bin_scores) * np.array(bin_counts)) / np.sum(bin_counts)
                     
                 importances.append([i, col, feat_importance, len(feat_bin_scores)])
             
@@ -3008,7 +3601,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         
         return super().get_pair_shape_function(feat1_name, feat2_name)
     
-    def plot_feature_importances(self, k=10):
+    def plot_feature_importances(self, k=10, missing_bin="include"):
         """
         Plot a bar plot with the importance score for the top k features.
         
@@ -3018,7 +3611,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             Number of features to plot.
         """
         
-        return super().plot_feature_importances(k)
+        return super().plot_feature_importances(k, missing_bin=missing_bin)
     
     def plot_pair_shape_function(self, feat1_name, feat2_name):
         """
@@ -3056,7 +3649,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             Only applicable for continuous features.
         """
         
-        return super().plot_shape_function(feature_names, plot_missing_bin)
+        return super().plot_shape_function(feature_names, plot_missing_bin, yaxis_label=r"Contribution to class logit")
     
     def predict(self, X_test):
         """
@@ -3089,6 +3682,39 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         """
         
         return super().select_features(X, y, partialed_feats)
+    
+    def score(self, X, y, y_train=None, model=None):
+        """
+        Compute the accuracy for the model on the provided data.
+        
+        Parameters
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for the model.
+            
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The labels, should be label encoded as 0, 1, ..., n_classes-1.
+        """
+        from sklearn.metrics import accuracy_score
+        preds = self._predict(X, models=[model])
+        hard_preds = np.argmax(preds, axis=1)
+        return {"ACCURACY": accuracy_score(y, hard_preds)}
+    
+    def _score_from_preds(self, y_preds, y, y_train=None):
+        """
+        Compute the accuracy score from predictions.
+        
+        Parameters
+        ----------
+        y_preds : numpy.ndarray, shape (n_samples, n_classes)
+            The predicted labels.
+            
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+
+        """ 
+        from sklearn.metrics import accuracy_score
+        hard_preds = np.argmax(y_preds, axis=1)
+        return accuracy_score(y, hard_preds)
 
 
 class DNAMiteSurvival(BaseDNAMiteModel):
@@ -3147,6 +3773,13 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         The monotonic constraints for the features.
         0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
         None means no constraints.
+    num_pairs : int, default=10
+        Number of pairwise interactions to use in the model.
+    verbosity : int, default=0
+        Level of verbosity for logging.
+        0: Warning, 1: Info, 2: Debug
+    random_state : int, optional
+        Random seed for reproducibility.
     """
 
     
@@ -3166,7 +3799,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         device="cpu", 
         fit_pairs=True,
         pairs_list=None, 
-        gamma=1,
+        gamma=None,
         pair_gamma=None,
         reg_param=0, 
         pair_reg_param=0, 
@@ -3176,7 +3809,10 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         pair_kernel_size=3, 
         pair_kernel_weight=1, 
         save_dir=None,
-        monotone_constraints=None
+        monotone_constraints=None,
+        num_pairs=10,
+        verbosity=0,
+        random_state=None
     ):
         super().__init__(
             n_features=n_features,
@@ -3203,8 +3839,21 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             pair_kernel_size=pair_kernel_size,
             pair_kernel_weight=pair_kernel_weight,
             save_dir=save_dir,
-            monotone_constraints=monotone_constraints
+            monotone_constraints=monotone_constraints,
+            num_pairs=num_pairs, 
+            verbosity=verbosity,
+            random_state=random_state
         )
+        
+    def _set_gamma(self, X):
+        
+        # Set gamma and pair_gamma if not provided
+        # Set to smaller value than default for survival analysis
+        if self.gamma is None:
+            super()._set_gamma(X)
+            self.gamma = self.gamma / 2
+        if self.pair_gamma is None:
+            self.pair_gamma = self.gamma / 4
             
         
     def get_data_loader(self, X, y, pairs=None, shuffle=True):
@@ -3247,7 +3896,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         active_feats = model.active_feats
         y_pred_init = 0
 
-        for X_main, events, times, pcw_obs_times in tqdm(train_loader, leave=False):
+        for X_main, events, times, pcw_obs_times in train_loader:
 
             X_main, events, times, pcw_obs_times = X_main.to(self.device), events.to(self.device), times.to(self.device), pcw_obs_times.to(self.device)
 
@@ -3295,7 +3944,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         y_pred_init = 0
         
         with torch.no_grad():
-            for X_main, events, times, pcw_obs_times in tqdm(test_loader, leave=False):
+            for X_main, events, times, pcw_obs_times in test_loader:
 
                 X_main, events, times, pcw_obs_times = X_main.to(self.device), events.to(self.device), times.to(self.device), pcw_obs_times.to(self.device)
 
@@ -3326,7 +3975,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         model.train()
         total_loss = 0
 
-        for X_main, X_pairs, events, times, pcw_obs_times in tqdm(train_loader, leave=False):
+        for X_main, X_pairs, events, times, pcw_obs_times in train_loader:
 
             X_main, X_pairs, events, times, pcw_obs_times = \
                 X_main.to(self.device), X_pairs.to(self.device), events.to(self.device), times.to(self.device), pcw_obs_times.to(self.device)
@@ -3367,7 +4016,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         preds = []
         
         with torch.no_grad():
-            for X_main, X_pairs, events, times, pcw_obs_times in tqdm(test_loader, leave=False):
+            for X_main, X_pairs, events, times, pcw_obs_times in test_loader:
 
                 X_main, X_pairs, events, times, pcw_obs_times = \
                     X_main.to(self.device), X_pairs.to(self.device), events.to(self.device), times.to(self.device), pcw_obs_times.to(self.device)
@@ -3452,6 +4101,10 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             A list of features that should be fit completely before fitting all other features.
         """
         
+        # Check the dtype of the labels
+        assert y.dtype.names is not None, "y must be a structured array with 'time' and 'event' fields."
+        assert "time" in y.dtype.names and "event" in y.dtype.names, "y must be a structured array with 'time' and 'event' fields."
+        
         self.cde = CensoringDistributionEstimator()
         self.cde.fit(y)
     
@@ -3474,7 +4127,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
         return
     
-    def get_feature_importances(self, eval_time=None):
+    def get_feature_importances(self, eval_time=None, missing_bin="include"):
         """
         Get the feature importance scores for all features in the model.
         
@@ -3482,6 +4135,9 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         ----------
         eval_time : float or None, default=None
             The evaluation time for which to compute the feature importance.
+            
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing the importance.
             
         Returns
         -------
@@ -3495,19 +4151,32 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         importances = []
         for split, model in enumerate(self.models):
             
-            # model.compute_intercept(model.bin_counts, ignore_missing_bin=ignore_missing_bin)
-        
-            # model.compute_pairs_intercept(model.pair_bin_counts)
-            
             for i, col in enumerate(model.feature_names_in_):
                 feat_bin_scores = model.bin_scores[i]
+                bin_counts = model.bin_counts[i]
+                
+                if missing_bin != "include" and self.has_missing_bin[i]:
+                    missing_bin_score = feat_bin_scores[0, :]
+                    feat_bin_scores = feat_bin_scores[1:, :]
+                    bin_counts = bin_counts[1:]
                 
                 if eval_time is not None:
-                    feat_importance = np.sum(np.abs(feat_bin_scores[:, eval_index]) * np.array(model.bin_counts[i])) / np.sum(model.bin_counts[i])
+                    feat_importance = np.sum(np.abs(feat_bin_scores[:, eval_index]) * np.array(bin_counts)) / np.sum(bin_counts)
                 else:
-                    feat_importance = np.sum(np.abs(feat_bin_scores) * np.array(model.bin_counts[i]).reshape(-1, 1)) / np.sum(model.bin_counts[i])
-                    
-                importances.append([split, col, feat_importance, len(feat_bin_scores)])
+                    feat_importance = np.sum(np.abs(feat_bin_scores) * np.array(bin_counts).reshape(-1, 1)) / np.sum(bin_counts)
+                
+                if missing_bin == "stratify":
+                    if self.has_missing_bin[i]:
+                        if eval_time is not None:
+                            missing_importance = np.abs(missing_bin_score[eval_index])
+                        else:
+                            missing_importance = np.sum(np.abs(missing_bin_score))
+                    else:
+                        missing_importance = np.nan
+                    importances.append([split, col, feat_importance, "observed", len(feat_bin_scores)])
+                    importances.append([split, col, missing_importance, "missing", 1])
+                else:
+                    importances.append([split, col, feat_importance, len(feat_bin_scores)])
                 
             if self.fit_pairs:
                 pairs_list = model.pairs_list.cpu().numpy()
@@ -3519,12 +4188,18 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                     else:
                         pair_importance = np.sum(np.abs(pair_bin_scores) * np.array(model.pair_bin_counts[i]).reshape(-1, 1)) / np.sum(model.pair_bin_counts[i])
                         
-                    importances.append([split, f"{model.feature_names_in_[pair[0]]} || {model.feature_names_in_[pair[1]]}", pair_importance, len(pair_bin_scores)])
-            
-        self.importances = pd.DataFrame(importances, columns=["split", "feature", "importance", "n_bins"])
+                    if missing_bin == "stratify":
+                        importances.append([split, f"{model.feature_names_in_[pair[0]]} || {model.feature_names_in_[pair[1]]}", pair_importance, "observed", len(pair_bin_scores)])
+                    else:
+                        importances.append([split, f"{model.feature_names_in_[pair[0]]} || {model.feature_names_in_[pair[1]]}", pair_importance, len(pair_bin_scores)])    
+                                
+        if missing_bin == "stratify":
+            self.importances = pd.DataFrame(importances, columns=["split", "feature", "importance", "bin_type", "n_bins"])
+        else:
+            self.importances = pd.DataFrame(importances, columns=["split", "feature", "importance", "n_bins"])
         return self.importances
     
-    def plot_feature_importances(self, k=10, eval_time=None):
+    def plot_feature_importances(self, k=10, eval_times=None, missing_bin="include"):
         """
         Plot a bar plot with the importance score for the top k features.
         
@@ -3533,18 +4208,54 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         k : int, default=10
             Number of features to plot.
             
-        eval_time : float or None, default=None
-            The evaluation time for which to compute the feature importance.
+        eval_time : float, list or None, default=None
+            The evaluation time(s) for which to compute the feature importance.
+            None means to compute the importance over all evaluation times.
+            
+        ignore_missing_bin : bool, default=False
+            Whether to ignore the missing bin when computing the importance.
         """
         
-        plt.figure(figsize=(6, 4))
-
-        feat_imps = self.get_feature_importances(eval_time=eval_time)
+        num_eval_times = len(eval_times) if isinstance(eval_times, list) else 1
+        fig, axes = plt.subplots(1, num_eval_times, figsize=(4*num_eval_times, 4))
         
-        top_k_features = feat_imps.groupby("feature")["importance"].agg(["mean", "sem"])
-        top_k_features = top_k_features.sort_values("mean", ascending=True).tail(k)
+        if not isinstance(eval_times, list):
+            eval_times = [eval_times]
+            
+        for i, et in enumerate(eval_times):
+            feat_imps = self.get_feature_importances(eval_time=et, missing_bin=missing_bin)
+            
+            if missing_bin == "stratify":
+                feat_means = feat_imps.groupby(["feature", "bin_type"])["importance"].mean().reset_index()
+                feat_means = feat_means.pivot(index="feature", columns="bin_type", values="importance").reset_index()
+                feat_means = feat_means.sort_values(by="observed", ascending=False).head(10)
+                feat_means = feat_means.melt(id_vars="feature", value_vars=["observed", "missing"], 
+                                            var_name="bin_type", value_name='importance')
 
-        plt.barh(top_k_features.index, top_k_features["mean"], xerr=1.96*top_k_features["sem"])
+                feat_sems = feat_imps.groupby(["feature", "bin_type"])["importance"].agg(["sem"]).reset_index()
+                feat_imps = feat_means.merge(feat_sems, on=["feature", "bin_type"])
+                sns.barplot(
+                    x="importance",
+                    y="feature",
+                    hue="bin_type",
+                    data=feat_imps,
+                    xerr=1.96 * feat_imps["sem"].values.reshape(2, -1),
+                    orient="h",
+                    ax=axes[i]
+                )
+                axes[i].set_ylabel("")
+
+                # Change title of legend
+                axes[i].set_legend(title="Importance Type")
+                axes[i].set_title(f"Feature Importances (stratified) at t={et}")
+                
+            else:
+            
+                top_k_features = feat_imps.groupby("feature")["importance"].agg(["mean", "sem"])
+                top_k_features = top_k_features.sort_values("mean", ascending=True).tail(k)
+
+                axes[i].barh(top_k_features.index, top_k_features["mean"], xerr=1.96*top_k_features["sem"])
+                axes[i].set_title(f"Feature Importances ({missing_bin}) at t={et}")
 
         plt.tight_layout()
     
@@ -3603,7 +4314,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
         return df.reset_index()
     
-    def plot_shape_function(self, feature_names, eval_time, plot_missing_bin=False):
+    def plot_shape_function(self, feature_names, eval_times, plot_missing_bin=False):
         """
         Plot the shape function for given feature(s).
         
@@ -3612,96 +4323,137 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         feature_names : str or list of str
             The name of the feature(s) to plot.
             
-        eval_time : float
-            The evaluation time for which to compute the shape function.
+        eval_times : float or list of float
+            The evaluation time(s) for which to compute the shape function.
             
         plot_missing_bin : bool, default=False
             Whether to plot the missing bin.
             Only applicable for continuous features.
         """
         
+        yaxis_label = r"Contribution to logit($P(T \leq t | X)$)"
+        
         if isinstance(feature_names, str):
             feature_names = [feature_names]
+            
+        if isinstance(eval_times, float):
+            eval_times = [eval_times]
             
         is_cat_cols = [self.feature_dtypes[self.feature_names_in_.get_loc(f)] != 'continuous' for f in feature_names]
         
         num_axes = sum([2 if not c and plot_missing_bin else 1 for _, c in zip(feature_names, is_cat_cols)])
+        # num_axes = num_axes * len(eval_times)
         
         if plot_missing_bin:
         
-            fig = plt.figure(figsize=(4*num_axes, 4))
+            # fig = plt.figure(figsize=(4*num_axes, 4))
+            # fig = plt.figure(figsize=(4*num_axes, 4*len(eval_times)))
             
-            gs = gridspec.GridSpec(1, 2*len(feature_names) + len(feature_names)-1, width_ratios=[10, 1, 2] * (len(feature_names)-1) + [10, 1])  # Add an extra column for the space
-            def generate_indices(n_times):
+            
+            # gs = gridspec.GridSpec(1, 2*len(feature_names) + len(feature_names)-1, width_ratios=[10, 1, 2] * (len(feature_names)-1) + [10, 1])  # Add an extra column for the space
+            # def generate_indices(n_times):
+            #     indices = []
+            #     for i in range(n_times):
+            #         indices.extend([i*3, i*3+1])
+            #     return indices
+
+            # axes = [fig.add_subplot(gs[i]) for i in generate_indices(len(feature_names))]
+            
+            fig = plt.figure(figsize=(4 * len(feature_names), 4 * len(eval_times)))
+
+            # Create GridSpec with rows equal to len(eval_times) and appropriate columns
+            gs = gridspec.GridSpec(len(eval_times), 2 * len(feature_names) + len(feature_names) - 1, width_ratios=[10, 1, 2] * (len(feature_names) - 1) + [10, 1])
+
+            def generate_indices(n_times, row):
+                """Generate indices for a specific row in the grid."""
                 indices = []
                 for i in range(n_times):
-                    indices.extend([i*3, i*3+1])
+                    indices.extend([row * (2 * n_times + n_times - 1) + i * 3, row * (2 * n_times + n_times - 1) + i * 3 + 1])
                 return indices
 
-            axes = [fig.add_subplot(gs[i]) for i in generate_indices(len(feature_names))]
+            # Create axes for all rows and columns
+            axes = [fig.add_subplot(gs[i]) for row in range(len(eval_times)) for i in generate_indices(len(feature_names), row)]
             
         else:
-            fig, axes = plt.subplots(1, num_axes, figsize=(4*num_axes, 4))
-            if num_axes == 1:
+            fig, axes = plt.subplots(len(eval_times), num_axes, figsize=(4*num_axes, 4*len(eval_times)))
+            if len(axes) == 1:
                 axes = [axes]
+            if len(feature_names) == 1:
+                axes = axes.reshape(-1, 1)
+                
         
         ax_idx = 0
         
-        for feature_name in feature_names:
-            
-            is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
-            
-            shape_data = self.get_shape_function(feature_name, eval_time)
-            
-            if not is_cat_col:
-                if not plot_missing_bin:
-                    line_plot_data = shape_data[shape_data["bin"].notna()].groupby("bin")["score"]
-                    axes[ax_idx].plot(line_plot_data.mean().index, line_plot_data.mean(), drawstyle='steps-post')
-                    axes[ax_idx].fill_between(
-                        line_plot_data.mean().index,
-                        line_plot_data.mean() - 1.96 * line_plot_data.sem(),
-                        line_plot_data.mean() + 1.96 * line_plot_data.sem(),
-                        alpha=0.3,
-                        step='post'
-                    )
-                    axes[ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
-                    axes[ax_idx].set_ylabel("")
-                    ax_idx += 1
-                else:
-                        
-                    # Make the line plot
-                    line_plot_data = shape_data[shape_data["bin"].notna()].groupby("bin")["score"]
-                    axes[ax_idx].plot(line_plot_data.mean().index, line_plot_data.mean(), drawstyle='steps-post')
-                    axes[ax_idx].fill_between(
-                        line_plot_data.mean().index,
-                        line_plot_data.mean() - 1.96 * line_plot_data.sem(),
-                        line_plot_data.mean() + 1.96 * line_plot_data.sem(),
-                        alpha=0.3,
-                        step='post'
-                    )
-                    axes[ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
-                    axes[ax_idx].set_ylabel("")
-                    
-                    ax_idx += 1
-
-                    # Make the bar plot
-                    bar_data = shape_data[shape_data["bin"].isna()]
-                    axes[ax_idx].bar("NA", bar_data["score"].mean())
-                    axes[ax_idx].errorbar("NA", bar_data["score"].mean(), yerr=1.96*bar_data["score"].sem(), fmt='none', color='black')
-                    axes[ax_idx].set_ylim(axes[0].get_ylim())
-                    axes[ax_idx].set_yticklabels([])
-                    axes[ax_idx].set_xlim(-0.5, 0.5)
-                    
-                    ax_idx += 1
-                    
-            else:
-                shape_data = shape_data.fillna("NA")
-                sns.barplot(x="bin", y="score", data=shape_data, errorbar=('ci', 95), ax=axes[ax_idx])
-                axes[ax_idx].tick_params(axis='x', rotation=45)
-                for label in axes[ax_idx].get_xticklabels():
-                    label.set_ha('right')
+        for eval_idx, eval_time in enumerate(eval_times):
+            ax_idx = 0
+            for feature_name in feature_names:
                 
-                ax_idx += 1
+                is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
+                
+                shape_data = self.get_shape_function(feature_name, eval_time)
+                
+                if not is_cat_col:
+                    if not plot_missing_bin:
+                        line_plot_data = shape_data[shape_data["bin"].notna()].groupby("bin")["score"]
+                        axes[eval_idx, ax_idx].plot(line_plot_data.mean().index, line_plot_data.mean(), drawstyle='steps-post')
+                        axes[eval_idx, ax_idx].fill_between(
+                            line_plot_data.mean().index,
+                            line_plot_data.mean() - 1.96 * line_plot_data.sem(),
+                            line_plot_data.mean() + 1.96 * line_plot_data.sem(),
+                            alpha=0.3,
+                            step='post'
+                        )
+                        axes[eval_idx, ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
+                        if ax_idx == 0:
+                            axes[eval_idx, ax_idx].set_ylabel(yaxis_label)
+                        else:
+                            axes[eval_idx, ax_idx].set_ylabel("")
+                        
+                        ax_idx += 1
+                    else:
+                            
+                        # Make the line plot
+                        line_plot_data = shape_data[shape_data["bin"].notna()].groupby("bin")["score"]
+                        axes[eval_idx, ax_idx].plot(line_plot_data.mean().index, line_plot_data.mean(), drawstyle='steps-post')
+                        axes[eval_idx, ax_idx].fill_between(
+                            line_plot_data.mean().index,
+                            line_plot_data.mean() - 1.96 * line_plot_data.sem(),
+                            line_plot_data.mean() + 1.96 * line_plot_data.sem(),
+                            alpha=0.3,
+                            step='post'
+                        )
+                        axes[eval_idx, ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
+                        if ax_idx == 0:
+                            axes[eval_idx, ax_idx].set_ylabel(yaxis_label)
+                        else:
+                            axes[eval_idx, ax_idx].set_ylabel("")
+                        
+                        
+                        ax_idx += 1
+
+                        # Make the bar plot
+                        bar_data = shape_data[shape_data["bin"].isna()]
+                        axes[eval_idx, ax_idx].bar("NA", bar_data["score"].mean())
+                        axes[eval_idx, ax_idx].errorbar("NA", bar_data["score"].mean(), yerr=1.96*bar_data["score"].sem(), fmt='none', color='black')
+                        axes[eval_idx, ax_idx].set_ylim(axes[0].get_ylim())
+                        axes[eval_idx, ax_idx].set_yticklabels([])
+                        axes[eval_idx, ax_idx].set_xlim(-0.5, 0.5)
+                        
+                        ax_idx += 1
+                        
+                else:
+                    shape_data = shape_data.fillna("NA")
+                    sns.barplot(x="bin", y="score", data=shape_data, errorbar=('ci', 95), ax=axes[eval_idx, ax_idx])
+                    axes[eval_idx, ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
+                    axes[eval_idx, ax_idx].tick_params(axis='x', rotation=45)
+                    for label in axes[eval_idx, ax_idx].get_xticklabels():
+                        label.set_ha('right')
+                    if ax_idx == 0:
+                        axes[eval_idx, ax_idx].set_ylabel(yaxis_label)
+                    else:
+                        axes[eval_idx, ax_idx].set_ylabel("")
+                        
+                    ax_idx += 1
                 
         plt.tight_layout()
     
@@ -3768,13 +4520,8 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
             # Get bin values
             if is_feat1_cat_col:
-                # feat1_bin_values = np.arange(-1, len(model.feature_bins[col1_index])+1)
                 feat1_bin_values = model.feature_bins[col1_index]
             else:
-                # feat1_bin_values = np.concatenate([
-                #     [model.feature_bins[col1_index].min() - 0.01],
-                #     model.feature_bins[col1_index]
-                # ])
                 feat1_bin_values = np.concatenate([
                     [np.nan],
                     [model.feature_bins[col1_index].min() - 0.01],
@@ -3782,21 +4529,13 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                 ])
                 
             if is_feat2_cat_col:
-                # feat2_bin_values = np.arange(-1, len(model.feature_bins[col2_index])+1)
                 feat2_bin_values = model.feature_bins[col2_index]
             else:
-                # feat2_bin_values = np.concatenate([
-                #     [model.feature_bins[col2_index].min() - 0.01],
-                #     model.feature_bins[col2_index]
-                # ])
                 feat2_bin_values = np.concatenate([
                     [np.nan],
                     [model.feature_bins[col2_index].min() - 0.01],
                     model.feature_bins[col2_index]
                 ])
-                
-            # print("FEAT1 BIN VALUES", feat1_bin_values.shape)
-            # print("FEAT2 BIN VALUES", feat2_bin_values.shape)
 
             pair_bin_values = self._make_grid(feat1_bin_values, feat2_bin_values)
             
@@ -3850,6 +4589,39 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         sns.heatmap(pair_data_dnamite)
         
         plt.tight_layout()
+        
+    def _predict(self, X_test_discrete, models):
+        
+        if hasattr(self, 'selected_feats'):
+            self.logger.debug("Found selected features. Using only those features.")
+            X_test_discrete = X_test_discrete[self.selected_feats]
+            
+            if self.fit_pairs:
+                pairs_list = [
+                    [X_test_discrete.columns.get_loc(feat1), X_test_discrete.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs
+                ]    
+        elif self.fit_pairs:
+            pairs_list = self.pairs_list
+        
+        # Make placeholder y_test
+        y_test = np.zeros(X_test_discrete.shape[0], dtype=[("event", "?"), ("time", "f8")])
+        
+        if not self.fit_pairs:
+            test_loader = self.get_data_loader(X_test_discrete, y_test, shuffle=False)
+            test_preds = np.zeros((len(models), X_test_discrete.shape[0], self.n_output))
+            for i, model in enumerate(models):
+                _, model_preds = self.test_epoch_mains(model, test_loader)
+                test_preds[i, ...] = model_preds.cpu().numpy()
+                
+        else:
+            X_test_interactions = X_test_discrete.values[:, pairs_list]
+            test_loader = self.get_data_loader(X_test_discrete, y_test, pairs=X_test_interactions, shuffle=False)
+            test_preds = np.zeros((len(models), X_test_discrete.shape[0], self.n_output))
+            for i, model in enumerate(models):
+                _, model_preds = self.test_epoch_pairs(model, test_loader)
+                test_preds[i, ...] = model_preds.cpu().numpy()
+            
+        return np.mean(test_preds, axis=0)
     
     def predict(self, X_test):
         """
@@ -3861,41 +4633,8 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             The input features for prediction.
         
         """
-        
-        # self.selected_pair_indices = list(combinations(range(self.n_features), 2))
-        
         X_test_discrete = self._discretize_data(X_test)
-        
-        if hasattr(self, 'selected_feats'):
-            print("Found selected features. Using only those features.")
-            X_test_discrete = X_test_discrete[self.selected_feats]
-            
-            if self.fit_pairs:
-                pairs_list = [
-                    [X_test_discrete.columns.get_loc(feat1), X_test_discrete.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs
-                ]    
-        elif self.fit_pairs:
-            pairs_list = self.pairs_list
-        
-        # Make placeholder y_test
-        y_test = np.zeros(X_test.shape[0], dtype=[("event", "?"), ("time", "f8")])
-        
-        if not self.fit_pairs:
-            test_loader = self.get_data_loader(X_test_discrete, y_test, shuffle=False)
-            test_preds = np.zeros((self.n_val_splits, X_test.shape[0], self.n_output))
-            for i, model in enumerate(self.models):
-                _, model_preds = self.test_epoch_mains(model, test_loader)
-                test_preds[i, ...] = model_preds.cpu().numpy()
-                
-        else:
-            X_test_interactions = X_test_discrete.values[:, pairs_list]
-            test_loader = self.get_data_loader(X_test_discrete, y_test, pairs=X_test_interactions, shuffle=False)
-            test_preds = np.zeros((self.n_val_splits, X_test.shape[0], self.n_output))
-            for i, model in enumerate(self.models):
-                _, model_preds = self.test_epoch_pairs(model, test_loader)
-                test_preds[i, ...] = model_preds.cpu().numpy()
-            
-        return np.mean(test_preds, axis=0)
+        return self._predict(X_test_discrete, self.models)
     
     def predict_survival(self, X_test, test_times=None):
         """
@@ -3927,6 +4666,68 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             ]
             
         return surv_preds
+    
+    def score(self, X, y, y_train, model=None):
+        """
+        Compute the time-dependent AUC score for the model.
+        
+        Parameters
+        ----------
+        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+            The input features for the model.
+            
+        y : structured np.array of shape (n_samples,) with dtype [("event", bool), ("time", float)]
+            Survival labels.
+            Event: True if event occurred, False if censored.
+            Time: Time to event or time of censoring.
+        """
+        
+        from sksurv.metrics import cumulative_dynamic_auc
+        
+        test_times = np.linspace(
+            max(y_train["time"].min(), y[y["event"] > 0]["time"].min()) + 1e-4,
+            min(y_train["time"].max(), y[y["event"] > 0]["time"].max()) - 1e-4,
+            1000
+        )
+        
+        preds = self._predict(X, models=[model])
+        cdf_preds = 1 / (1 + np.exp(-1 * preds))
+        
+        return {"Mean_AUC": cumulative_dynamic_auc(y_train, y, cdf_preds, test_times)[1]}
+    
+    def _score_from_preds(self, y_preds, y, y_train=None):
+        """
+        Compute the time-dependent AUC score for the model.
+        
+        Parameters
+        ----------
+        
+        y_preds : np.ndarray of shape (n_samples, n_eval_times)
+            Survival predictions.
+            
+        y : structured np.array of shape (n_samples,) with dtype [("event", bool), ("time", float)]
+        
+        y_train : structured np.array of shape (n_samples,) with dtype [("event", bool), ("time", float)]
+            Training survival labels.
+        """
+        
+        from sksurv.metrics import cumulative_dynamic_auc
+        
+        test_times = np.linspace(
+            max(y_train["time"].min(), y[y["event"] > 0]["time"].min()) + 1e-4,
+            min(y_train["time"].max(), y[y["event"] > 0]["time"].max()) - 1e-4,
+            1000
+        )
+        
+        cdf_preds = 1 / (1 + np.exp(-1 * y_preds))
+        
+        if test_times is not None:
+            cdf_preds = cdf_preds[
+                :,
+                np.searchsorted(self.eval_times.cpu().numpy(), test_times, side='right') - 1
+            ]
+        
+        return cumulative_dynamic_auc(y_train, y, cdf_preds, test_times)[1]
     
     def get_calibration_data(self, X, y, eval_time, n_bins=10, binning_method="quantile"):
         """
