@@ -17,6 +17,7 @@ from sklearn.preprocessing import OrdinalEncoder
 from sklearn.compose import make_column_transformer
 from sklearn.metrics import mean_squared_error, roc_auc_score
 from sksurv.nonparametric import CensoringDistributionEstimator, kaplan_meier_estimator
+from sksurv.linear_model import CoxPHSurvivalAnalysis
 from tqdm import tqdm
 import os
 from functools import partial
@@ -87,14 +88,12 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
         The list of pairs for the model.
     kernel_size : int, optional (default=5)
         The size of the kernel for smoothing.
-    kernel_weight : float, optional (default=1)
+    kernel_weight : float, optional (default=3)
         The weight for kernel smoothing.
     pair_kernel_size : int, optional (default=3)
         The size of the kernel for smoothing pairs.
-    pair_kernel_weight : float, optional (default=1)
+    pair_kernel_weight : float, optional (default=3)
         The weight for kernel smoothing for pairs.
-    save_dir : str, optional (default=None)
-        The directory to save the model.
     cat_feat_mask : list or None, optional (default=None)
         The mask for categorical features.
     monotone_constraints : list or None, optional (default=None)
@@ -121,10 +120,9 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
                  device="cpu", 
                  pairs_list=None, 
                  kernel_size=5,
-                 kernel_weight=1,
+                 kernel_weight=3,
                  pair_kernel_size=3,
-                 pair_kernel_weight=1,
-                 save_dir=None,
+                 pair_kernel_weight=3,
                  cat_feat_mask=None,
                  monotone_constraints=None,
                  verbosity=0
@@ -165,21 +163,11 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
             self.cat_feat_mask = cat_feat_mask.to(device)
         else:
             self.cat_feat_mask = torch.zeros(n_features).astype(bool).to(device)
-        
-        if save_dir is not None:
-            self.save_dir = save_dir            
-        else:
-            self.save_dir = "model_saves/"
             
         self.monotone_constraints = monotone_constraints
         if monotone_constraints is not None:
             self.monotone_constraints_tensor = torch.tensor(monotone_constraints, device=device).view(1, n_features, 1)
             self.monotone_params = nn.Parameter((torch.rand(n_features, n_output) * 0.2) - 0.1)
-            
-            
-        # check if save_dir exists
-        if not os.path.exists(self.save_dir):
-            os.makedirs(self.save_dir)
         
         
         if self.reg_param == 0:
@@ -440,7 +428,6 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
                 for feat_idx in range(len(self.monotone_constraints)):
                     if self.monotone_constraints[feat_idx] != 0:
                         bin_scores = self.get_bin_scores(feat_idx, center=False, backprop=True) # (feature_size, n_output)
-                        # cum_bin_scores = torch.cumsum(bin_scores, dim=0)
                         feat_input = inputs[:, feat_idx].long()
                         mains[:, feat_idx, :] = bin_scores[feat_input - 1, :] + mains[:, feat_idx, :] # (batch_size, n_output)
                 
@@ -833,7 +820,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
             feat_bin_counts = torch.tensor(bin_counts[feat_idx]).to(self.device).unsqueeze(-1)
             
             if ignore_missing_bin and has_missing_bin[feat_idx]:
-                self.logger.debug("Ignoring missing bin for feature", feat_idx)
+                self.logger.debug(f"Ignoring missing bin for feature {feat_idx.item()} in Intercept Calculation")
                 feat_bin_counts = feat_bin_counts[1:]
                 bin_preds = bin_preds[1:, :]
             
@@ -901,18 +888,6 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
                 self.logger.info(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f} | Active pairs: {len(self.active_pairs)}")
             else:
                 self.logger.info(f"Epoch {epoch+1} | Train loss: {train_loss:.3f} | Test loss: {test_loss:.3f}")
-
-            # Check if the test loss has improved
-            # if test_loss < best_test_loss:
-            #     best_test_loss = test_loss
-            #     early_stopping_counter = 0
-                
-            #     # Save the model at the best test loss
-            #     # torch.save(self.state_dict(), "../model_saves/tmp_best_model.pt")
-            #     torch.save(self.state_dict(), os.path.join(self.save_dir, "tmp_best_model.pt"))
-                
-            # else:
-                # early_stopping_counter += 1
                 
             if test_loss < best_test_loss:
                 best_test_loss = test_loss
@@ -930,7 +905,6 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
                 break
             
         # Load the model from the best test loss
-        # self.load_state_dict(torch.load(os.path.join(self.save_dir, "tmp_best_model.pt")))
         if best_model_state is not None:
             self.load_state_dict(best_model_state)
 
@@ -956,6 +930,9 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         Number of hidden layers in the model.
     max_bins : int, default=32
         Maximum number of bins for feature discretization.
+    min_samples_per_bin : int, default=None
+        Minimum number of samples required in each bin.
+        Default is None which sets it to min(n_train_samples / 100, 50).
     validation_size : float, default=0.2
         Proportion of data to use for validation.
     n_val_splits : int, default=5
@@ -968,33 +945,21 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         Batch size for training.
     device : str, default="cpu"
         Device for model computation, either "cpu" or "cuda".
-    fit_pairs : bool, default=True
-        Flag indicating whether to fit pairwise interactions between features.
     pairs_list : list of tuple[int, int], optional
         List of feature pairs to consider for interactions; if None, no specific pairs are used.
-    gamma : float, default=1
-        Regularization or scaling parameter; purpose depends on specific use in the model.
-    reg_param : float, default=0
-        Regularization parameter for feature-level regularization.
-    pair_reg_param : float, default=0
-        Regularization parameter for feature pairs.
-    entropy_param : float, default=0
-        Entropy parameter to control the diversity or uncertainty.
     kernel_size : int, default=5
         Size of the kernel used in smoothing for single features.
-    kernel_weight : float, default=1
+    kernel_weight : float, default=3
         Weight applied to the smoothing kernel for single features.
     pair_kernel_size : int, default=3
         Kernel size for smoothing pairwise feature interactions.
-    pair_kernel_weight : float, default=1
+    pair_kernel_weight : float, default=3
         Weight applied to the smoothing kernel for feature pairs.
-    save_dir : str, optional
-        Directory path to save model outputs and checkpoints; if None, no saving occurs.
     monotone_constraints : list or None, optional (default=None)
         The monotonic constraints for the features.
         0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
         None means no constraints.
-    num_pairs : int, default=10
+    num_pairs : int, default=0.
         Number of pairwise interactions to use in the model.
     verbosity : int, default=0
         Level of verbosity for logging.
@@ -1010,26 +975,20 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                  n_hidden=32,
                  n_layers=2, 
                  max_bins=32, 
+                 min_samples_per_bin=None,
                  validation_size=0.2, 
                  n_val_splits=5, 
                  learning_rate=1e-4, 
                  max_epochs=100, 
                  batch_size=128, 
                  device="cpu", 
-                 fit_pairs=True,
                  pairs_list=None,
-                 gamma=None,
-                 pair_gamma=None,
-                 reg_param=0, 
-                 pair_reg_param=0, 
-                 entropy_param=0, 
                  kernel_size=5, 
-                 kernel_weight=1, 
+                 kernel_weight=3, 
                  pair_kernel_size=3, 
-                 pair_kernel_weight=1, 
-                 save_dir=None,
+                 pair_kernel_weight=3, 
                  monotone_constraints=None,
-                 num_pairs=10,
+                 num_pairs=0,
                  verbosity=0,
                  random_state=None,
     ):
@@ -1041,32 +1000,25 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         self.n_output = n_output
         self.n_layers = n_layers
         self.max_bins = max_bins
+        self.min_samples_per_bin = min_samples_per_bin
         self.validation_size = validation_size
         self.n_val_splits = n_val_splits
         self.learning_rate = learning_rate
         self.max_epochs = max_epochs
         self.batch_size = batch_size
         self.device = device
-        self.fit_pairs = fit_pairs
         self.pairs_list = pairs_list
-        # if pairs_list is None and fit_pairs:
-        #     self.pairs_list = list(combinations(range(n_features), 2))
-        self.gamma = gamma
-        self.pair_gamma = pair_gamma if pair_gamma is not None else gamma
-        self.reg_param = reg_param
-        self.pair_reg_param = pair_reg_param
-        self.entropy_param = entropy_param
         self.kernel_size = kernel_size
         self.kernel_weight = kernel_weight
         self.pair_kernel_size = pair_kernel_size
         self.pair_kernel_weight = pair_kernel_weight
-        self.save_dir = save_dir
         self.monotone_constraints = monotone_constraints
         self.num_pairs = num_pairs
         self.verbosity = verbosity
-        self.random_state = random_state
+        self.random_state = random_state if random_state is not None else np.random.randint(0, 1000)
         
         self.models = nn.ModuleList()
+        self.fit_pairs = self.num_pairs > 0
         
     def _set_gamma(self, X):
         if self.gamma is None:
@@ -1133,7 +1085,11 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             from time import time
             for i in range(self.n_features):
                 if self.feature_dtypes[i] == 'continuous':
-                    X_discrete[:, i], bins = discretize(np.ascontiguousarray(X_discrete[:, i]), max_bins=self.max_bins)
+                    X_discrete[:, i], bins = discretize(
+                        np.ascontiguousarray(X_discrete[:, i]), 
+                        max_bins=self.max_bins, 
+                        min_samples_per_bin=self.min_samples_per_bin
+                    )
                     self.has_missing_bin.append(True)
                 elif self.feature_dtypes[i] == 'binary':
                     bins = [0, 1]
@@ -1208,7 +1164,17 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                 
         return
     
-    def _fit_one_split(self, X_train, y_train, X_val, y_val, random_state=None, partialed_indices=None):
+    def _fit_one_split(
+        self, 
+        X_train, 
+        y_train, 
+        X_val, 
+        y_val, 
+        random_state=None, 
+        partialed_indices=None, 
+        train_loader_args={},
+        val_loader_args={},
+    ):
         
         # Set random seed if one is provided
         if random_state is not None:
@@ -1236,8 +1202,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         # Get data loaders
         self.logger.debug("GETTING DATA LOADERS")
-        train_loader = self.get_data_loader(X_train, y_train)
-        val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
+        train_loader = self.get_data_loader(X_train, y_train, **train_loader_args)
+        val_loader = self.get_data_loader(X_val, y_val, shuffle=False, **val_loader_args)
         
         model = _BaseSingleSplitDNAMiteModel(
             n_features=X_train.shape[1], 
@@ -1253,7 +1219,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             kernel_weight=self.kernel_weight,
             pair_kernel_size=self.pair_kernel_size,
             pair_kernel_weight=self.pair_kernel_weight,
-            save_dir=self.save_dir,
             cat_feat_mask=self.cat_feat_mask,
             monotone_constraints=self.monotone_constraints,
             verbosity=self.verbosity
@@ -1267,8 +1232,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             model.active_feats = torch.tensor(partialed_indices).to(self.device)
             
             # Get data loaders only for partialed feats
-            train_loader = self.get_data_loader(X_train.iloc[:, partialed_indices], y_train)
-            val_loader = self.get_data_loader(X_val.iloc[:, partialed_indices], y_val, shuffle=False)
+            train_loader = self.get_data_loader(X_train.iloc[:, partialed_indices], y_train, **train_loader_args)
+            val_loader = self.get_data_loader(X_val.iloc[:, partialed_indices], y_val, shuffle=False, **val_loader_args)
             
             model.train_(
                 partial(self.train_epoch_mains, on_partialed_set=True), 
@@ -1282,8 +1247,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             model.active_feats = torch.arange(self.n_features).to(self.device)
             
             # Get data loaders
-            train_loader = self.get_data_loader(X_train, y_train)
-            val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
+            train_loader = self.get_data_loader(X_train, y_train, **train_loader_args)
+            val_loader = self.get_data_loader(X_val, y_val, shuffle=False, **val_loader_args)
         
         self.logger.debug("TRAINING MAINS")
         model.train_(
@@ -1327,8 +1292,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         X_train_interactions = X_train.values[:, pairs_list]
         X_val_interactions = X_val.values[:, pairs_list]
         
-        train_loader = self.get_data_loader(X_train, y_train, pairs=X_train_interactions)
-        val_loader = self.get_data_loader(X_val, y_val, pairs=X_val_interactions, shuffle=False)
+        train_loader = self.get_data_loader(X_train, y_train, pairs=X_train_interactions, **train_loader_args)
+        val_loader = self.get_data_loader(X_val, y_val, pairs=X_val_interactions, shuffle=False, **val_loader_args)
         
         optimizer = torch.optim.Adam(
             [p for p in model.parameters() if p.requires_grad], 
@@ -1355,7 +1320,18 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
     
         return model
     
-    def select_features(self, X, y, partialed_feats=None):
+    def select_features(
+        self, 
+        X, 
+        y, 
+        reg_param,
+        select_pairs=False, 
+        partialed_feats=None,
+        gamma=None,
+        pair_gamma=None, 
+        pair_reg_param=0, 
+        entropy_param=0, 
+    ):
         """
         Perform feature selection. Selected features and pairs will be stored in model.selected_feats
         and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
@@ -1363,22 +1339,41 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         Parameters
         ----------
         X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
-            The input features for the model.
-            
+            The input features for the model.   
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
-            The target variable.
-            
+            The target variable. 
+        reg_param : float
+            Regularization parameter for feature-level regularization.
+        select_pairs : bool, default=False
+            Whether to select feature pairs in addition to individual features.
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
+        gamma : float, default=1
+            Regularization or scaling parameter; purpose depends on specific use in the model.
+        pair_gamma : float or None, default=None
+            Regularization or scaling parameter for feature pairs.
+            If None, defaults to gamma.
+        pair_reg_param : float, default=0
+            Regularization parameter for feature pairs.
+        entropy_param : float, default=0
+            Entropy parameter to control the diversity or uncertainty.
         """
+        self.gamma = gamma
+        self.pair_gamma = pair_gamma if pair_gamma is not None else gamma
+        self.reg_param = reg_param
+        self.pair_reg_param = pair_reg_param
+        self.entropy_param = entropy_param
         
         if self.reg_param <= 0 and self.pair_reg_param <= 0:
             raise ValueError("Regularization parameters must be greater than 0 for feature selection.")
         
+        if select_pairs:
+            self.fit_pairs = True
+        
         _ = self._select_features(X, y, partialed_feats=partialed_feats)
         return
     
-    def _select_features(self, X, y, partialed_feats=None, model=None):
+    def _select_features(self, X, y, partialed_feats=None, model=None, train_loader_args={}, val_loader_args={}):
         self.logger.debug("STARTING SELECT FEATURES...")
         
         # Set random seed if one is provided
@@ -1406,8 +1401,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         self._set_gamma(X_train)
         
         # Get data loaders
-        train_loader = self.get_data_loader(X_train, y_train)
-        val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
+        train_loader = self.get_data_loader(X_train, y_train, **train_loader_args)
+        val_loader = self.get_data_loader(X_val, y_val, shuffle=False, **val_loader_args)
         
         if model is None:
             model = _BaseSingleSplitDNAMiteModel(
@@ -1427,7 +1422,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                 kernel_weight=self.kernel_weight,
                 pair_kernel_size=self.pair_kernel_size,
                 pair_kernel_weight=self.pair_kernel_weight,
-                save_dir=self.save_dir,
                 cat_feat_mask=self.cat_feat_mask,
                 monotone_constraints=self.monotone_constraints,
                 verbosity=self.verbosity
@@ -1447,8 +1441,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             model.penalized = False
             
             # Get data loaders only for partialed feats
-            train_loader = self.get_data_loader(X_train[:, partialed_indices], y_train)
-            val_loader = self.get_data_loader(X_val[:, partialed_indices], y_val, shuffle=False)
+            train_loader = self.get_data_loader(X_train[:, partialed_indices], y_train, **train_loader_args)
+            val_loader = self.get_data_loader(X_val[:, partialed_indices], y_val, shuffle=False, **val_loader_args)
             
             model.train_(
                 partial(self.train_epoch_mains, on_partialed_set=True), 
@@ -1468,8 +1462,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             model.penalized = penalized
             
             # Go back to full loaders
-            train_loader = self.get_data_loader(X_train, y_train)
-            val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
+            train_loader = self.get_data_loader(X_train, y_train, **train_loader_args)
+            val_loader = self.get_data_loader(X_val, y_val, shuffle=False, **val_loader_args)
         
         best_val_loss = model.train_(
             partial(self.train_epoch_mains, partialed_indices=partialed_indices), 
@@ -1505,8 +1499,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         model.active_pairs = torch.arange(model.n_pairs).to(self.device)
         model.to(self.device)
         
-        train_loader = self.get_data_loader(X_train, y_train, pairs=X_train_interactions)
-        val_loader = self.get_data_loader(X_val, y_val, pairs=X_val_interactions, shuffle=False)
+        train_loader = self.get_data_loader(X_train, y_train, pairs=X_train_interactions, **train_loader_args)
+        val_loader = self.get_data_loader(X_val, y_val, pairs=X_val_interactions, shuffle=False, **val_loader_args)
         
         optimizer = torch.optim.Adam(
             [p for p in model.parameters() if p.requires_grad], 
@@ -1524,8 +1518,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             verbose=True,
             show_pair_count=True
         )
-        val_score = self.score(pd.DataFrame(X_val, columns=self.feature_names_in_), y_val, y_train, model=model)
-        # val_score = {"Test": 0}
+        # val_score = self.score(pd.DataFrame(X_val, columns=self.feature_names_in_), y_val, y_train, model=model)
+        val_score = {}
         
         self.selected_feats = self.feature_names_in_[model.active_feats.cpu().numpy()].tolist()
         self.selected_pairs = [
@@ -1582,130 +1576,11 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         val_score_name = list(val_score.keys())[0]
             
         return feats, pd.DataFrame({"num_feats": num_feats, "val_loss": losses, f"val_{val_score_name}": scores})
-            
-        
-        
-        
-        # if partialed_feats is not None:
-        #     partialed_indices = [X.columns.get_loc(feat) for feat in partialed_feats]
-        # else:
-        #     partialed_indices = None
-        
-        # self.feature_names_in_ = X.columns
-        
-        # # First discretize the data
-        # X_discrete = self._discretize_data(X)
-        
-        # if hasattr(X, 'values'):
-        #     X_discrete = X_discrete.values
-        
-        # # Make one train/val split for feature selection
-        # X_train, X_val, y_train, y_val = train_test_split(X_discrete, y, test_size=self.validation_size)
-        
-        # # Get data loaders
-        # train_loader = self.get_data_loader(X_train, y_train)
-        # val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
-        
-        # model = _BaseSingleSplitDNAMiteModel(
-        #     n_features=self.n_features, 
-        #     n_output=self.n_output,
-        #     feature_sizes=self.feature_sizes, 
-        #     n_embed=self.n_embed,
-        #     n_hidden=self.n_hidden, 
-        #     n_layers=self.n_layers,
-        #     gamma=self.gamma, 
-        #     pair_gamma=self.pair_gamma,
-        #     reg_param=self.reg_param, 
-        #     pair_reg_param=self.pair_reg_param, 
-        #     entropy_param=self.entropy_param, 
-        #     device=self.device, 
-        #     kernel_size=self.kernel_size,
-        #     kernel_weight=self.kernel_weight,
-        #     pair_kernel_size=self.pair_kernel_size,
-        #     pair_kernel_weight=self.pair_kernel_weight,
-        #     save_dir=self.save_dir,
-        #     cat_feat_mask=self.cat_feat_mask,
-        #     monotone_constraints=self.monotone_constraints
-        # ).to(self.device)
-
-        # optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
-        
-        # if partialed_indices is not None:
-        #     # print("TRAINING ON PARTIALED FEATS")
-            
-        #     model.active_feats = torch.tensor(partialed_indices).to(self.device)
-        #     reg_param = model.reg_param
-        #     entropy_param = model.entropy_param
-        #     penalized = model.penalized
-        #     model.reg_param = 0
-        #     model.entropy_param = 0
-        #     model.penalized = False
-            
-        #     # Get data loaders only for partialed feats
-        #     train_loader = self.get_data_loader(X_train[:, partialed_indices], y_train)
-        #     val_loader = self.get_data_loader(X_val[:, partialed_indices], y_val, shuffle=False)
-            
-        #     model.train_(
-        #         partial(self.train_epoch_mains, on_partialed_set=True), 
-        #         partial(self.test_epoch_mains, on_partialed_set=True), 
-        #         train_loader, 
-        #         val_loader, 
-        #         optimizer, 
-        #         self.max_epochs,
-        #         mains=True,
-        #         verbose=True,
-        #         show_feat_count=True
-        #     )
-            
-        #     model.active_feats = torch.arange(X.shape[1]).to(self.device)
-        #     model.reg_param = reg_param
-        #     model.entropy_param = entropy_param
-        #     model.penalized = penalized
-            
-        #     # Go back to full loaders
-        #     train_loader = self.get_data_loader(X_train, y_train)
-        #     val_loader = self.get_data_loader(X_val, y_val, shuffle=False)
-        
-        # model.reg_param = init_reg_param
-        
-        # n_feat_selected = np.inf
-        # scores = []
-        # num_feats = []
-        # feats = []
-        # while n_feat_selected > 0:
-        #     print("REG PARAM", model.reg_param)
-        
-        #     model.train_(
-        #         partial(self.train_epoch_mains, partialed_indices=partialed_indices), 
-        #         self.test_epoch_mains, 
-        #         train_loader, 
-        #         val_loader, 
-        #         optimizer, 
-        #         self.max_epochs,
-        #         mains=True,
-        #         verbose=True,
-        #         show_feat_count=True
-        #     )
-            
-        #     # print("Number of main features selected: ", len(model.active_feats))
-            
-        #     _, val_preds = self.test_epoch_mains(model, val_loader)
-            
-        #     score = self._score_from_preds(val_preds.detach().cpu().numpy(), y_val, y_train)
-        #     scores.append(score)
-            
-        #     n_feat_selected = len(model.active_feats)
-        #     num_feats.append(n_feat_selected)
-            
-        #     feats.append(self.feature_names_in_[model.active_feats.cpu().numpy()].tolist())
-        #     model.reg_param = model.reg_param * 2
-            
-        
-        # return scores, num_feats, feats
     
     def select_pairs(self, model, X_train, y_train, X_val, y_val, num_pairs=10):
         """
         Select only pairs for a model that uses all features.
+        Uses heuristic method of selecting the top k pairs based on the pair scores.
         
         
         Parameters
@@ -1905,8 +1780,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                 
         if hasattr(self, 'selected_feats'):
             self.logger.debug("Found selected features. Using only those features.")
-            print("SELECTED FEATS", len(self.selected_feats))
-            print("X TEST DISCRETE", X_test_discrete.shape)
             X_test_discrete = X_test_discrete[self.selected_feats]
         
         return self._predict(X_test_discrete, self.models)
@@ -1974,13 +1847,13 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             self.importances = pd.DataFrame(importances, columns=["split", "feature", "importance", "n_bins"])
         return self.importances
     
-    def plot_feature_importances(self, k=10, missing_bin="include"):
+    def plot_feature_importances(self, n_features=10, missing_bin="include"):
         """
         Plot a bar plot with the importance score for the top k features.
         
         Parameters
         ----------
-        k : int, default=10
+        n_features : int, default=10
             Number of features to plot.
             
         missing_bin : str, default="include"
@@ -1995,57 +1868,49 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         feat_imps = self.get_feature_importances(missing_bin=missing_bin)
 
         if missing_bin == "stratify":
-            # feat_means = feat_imps.groupby(["feature", "bin_type"])["importance"].mean().reset_index()
-            # feat_means = feat_means.pivot(index="feature", columns="bin_type", values="importance").reset_index()
-            # feat_means = feat_means.sort_values(by="observed", ascending=False).head(10)
-            # feat_means["missing"] = feat_means["missing"] * -1
-            # feat_means = feat_means.melt(id_vars="feature", value_vars=["observed", "missing"], 
-            #                             var_name="bin_type", value_name='importance')
-
-            # feat_sems = feat_imps.groupby(["feature", "bin_type"])["importance"].agg(["sem"]).reset_index()
-            # feat_imps = feat_means.merge(feat_sems, on=["feature", "bin_type"])
-            # sns.barplot(
-            #     x="importance",
-            #     y="feature",
-            #     hue="bin_type",
-            #     data=feat_imps,
-            #     xerr=1.96 * feat_imps["sem"].values.reshape(2, -1),
-            #     orient="h"
-            # )
             feat_means = feat_imps.groupby(["feature", "bin_type"])["importance"].mean().reset_index()
             feat_means = feat_means.pivot(index="feature", columns="bin_type", values="importance").reset_index()
-            feat_means = feat_means.sort_values(by="observed", ascending=True).tail(10)
-            # feat_means = feat_means.melt(id_vars="feature", value_vars=["observed", "missing"], 
-            #                               var_name="bin_type", value_name='importance')
-
-            feat_sems = feat_imps.groupby(["feature", "bin_type"])["importance"].agg(["sem"]).reset_index()
-            feat_sems = feat_sems.pivot(index="feature", columns="bin_type", values="sem").reset_index()
-            feat_imps = feat_means.merge(feat_sems, on="feature", suffixes=("", "_sem"))
-            plt.barh(
-                y=feat_imps["feature"],
-                width=feat_imps["observed"],
-                xerr=1.96 * feat_imps["observed_sem"],
-            )
-            plt.barh(
-                y=feat_imps["feature"],
-                width=-1*feat_imps["missing"],
-                xerr=1.96 * feat_imps["missing_sem"],
-                color=sns.color_palette()[1]
-            )
+            feat_means = feat_means.sort_values(by="observed", ascending=True).tail(n_features)
+            
+            if self.n_val_splits == 1:
+                plt.barh(feat_means["feature"], feat_means["observed"], color=sns.color_palette()[0])
+                plt.barh(feat_means["feature"], -1*feat_means["missing"], color=sns.color_palette()[1])
+            else:
+                feat_sems = feat_imps.groupby(["feature", "bin_type"])["importance"].agg(["sem"]).reset_index()
+                feat_sems = feat_sems.pivot(index="feature", columns="bin_type", values="sem").reset_index()
+                feat_imps = feat_means.merge(feat_sems, on="feature", suffixes=("", "_sem"))
+                plt.barh(
+                    y=feat_imps["feature"],
+                    width=feat_imps["observed"],
+                    xerr=1.96 * feat_imps["observed_sem"],
+                )
+                plt.barh(
+                    y=feat_imps["feature"],
+                    width=-1*feat_imps["missing"],
+                    xerr=1.96 * feat_imps["missing_sem"],
+                    color=sns.color_palette()[1]
+                )
+                
             plt.ylabel("")
 
-            # Change title of legend
-            # plt.legend(title="Importance Type")
-            
             # Add legend
             plt.legend(["Observed", "Missing"], title="Importance Type")
+            
+            ax = plt.gca()
+            xticks = ax.get_xticks()
+            xticklabels = [round(abs(x), 2) for x in xticks]
+            ax.set_xticks(xticks)
+            ax.set_xticklabels(xticklabels)
             
         else:
         
             top_k_features = feat_imps.groupby("feature")["importance"].agg(["mean", "sem"])
-            top_k_features = top_k_features.sort_values("mean", ascending=True).tail(k)
+            top_k_features = top_k_features.sort_values("mean", ascending=True).tail(n_features)
 
-            plt.barh(top_k_features.index, top_k_features["mean"], xerr=1.96*top_k_features["sem"])
+            if self.n_val_splits == 1:
+                plt.barh(top_k_features.index, top_k_features["mean"])
+            else:
+                plt.barh(top_k_features.index, top_k_features["mean"], xerr=1.96*top_k_features["sem"])
             
         plt.xlabel("Importance")
         plt.title(f"Feature Importances ({missing_bin})")
@@ -2115,19 +1980,27 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             Only applicable for continuous features.
         """
         
+        def set_font_sizes(axes):
+            LABEL_FONT_SIZE = 14 * (1.5 if plot_missing_bin else 1)
+            TICK_FONT_SIZE = 12 * (1.5 if plot_missing_bin else 1)
+            for ax in axes:
+                ax.xaxis.label.set_fontsize(LABEL_FONT_SIZE)
+                ax.yaxis.label.set_fontsize(LABEL_FONT_SIZE)
+                ax.tick_params(axis='both', which='major', labelsize=TICK_FONT_SIZE)
+        
         if isinstance(feature_names, str):
             feature_names = [feature_names]
             
         is_cat_cols = [self.feature_dtypes[self.feature_names_in_.get_loc(f)] != 'continuous' for f in feature_names]
-        
+
         num_axes = sum([2 if not c and plot_missing_bin else 1 for _, c in zip(feature_names, is_cat_cols)])
-        
+
         if axes is None:
             if plot_missing_bin:
             
                 fig = plt.figure(figsize=(4*num_axes, 4))
-                
-                gs = gridspec.GridSpec(1, 2*len(feature_names) + len(feature_names)-1, width_ratios=[10, 1, 2] * (len(feature_names)-1) + [10, 1])  # Add an extra column for the space
+
+                gs = gridspec.GridSpec(1, 2*len(feature_names) + len(feature_names)-1, width_ratios=[10, 1, 4] * (len(feature_names)-1) + [10, 1])  # Add an extra column for the space
                 def generate_indices(n_times):
                     indices = []
                     for i in range(n_times):
@@ -2140,9 +2013,11 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                 fig, axes = plt.subplots(1, num_axes, figsize=(4*num_axes, 4))
                 if num_axes == 1:
                     axes = [axes]
-        
+                    
+            set_font_sizes(axes)
+
         ax_idx = 0
-        
+
         for feature_name in feature_names:
             shape_data = self.get_shape_function(feature_name)
             is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
@@ -2160,7 +2035,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                     )
                     axes[ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
                     if ax_idx == 0:
-                        axes[ax_idx].set_ylabel(yaxis_label)
+                        axes[ax_idx].set_ylabel("\n".join(textwrap.wrap(yaxis_label, width=25)))
                     else:
                         axes[ax_idx].set_ylabel("")
                     ax_idx += 1
@@ -2178,7 +2053,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                     )
                     axes[ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
                     if ax_idx == 0:
-                        axes[ax_idx].set_ylabel(yaxis_label)
+                        axes[ax_idx].set_ylabel("\n".join(textwrap.wrap(yaxis_label, width=25)))
                     else:
                         axes[ax_idx].set_ylabel("")
                     
@@ -2201,12 +2076,13 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                 for label in axes[ax_idx].get_xticklabels():
                     label.set_ha('right')
                 if ax_idx == 0:
-                    axes[ax_idx].set_ylabel(yaxis_label)
+                    axes[ax_idx].set_ylabel("\n".join(textwrap.wrap(yaxis_label, width=25)))
                 else:
                     axes[ax_idx].set_ylabel("")
                 ax_idx += 1
-                
-        plt.tight_layout()
+        
+        if not plot_missing_bin:
+            plt.tight_layout()
         
     def _make_grid(self, x, y):
         grid = np.meshgrid(x, y, indexing="ij")
@@ -2231,9 +2107,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             A DataFrame containing the shape function data for the interaction effect.
         """
         
-        is_feat1_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feat1_name)] != 'continuous'
-        is_feat2_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feat2_name)] != 'continuous'
-        
         bin_scores = []
         bin_values = []
         for i, model in enumerate(self.models):
@@ -2252,20 +2125,21 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             
             pair_bin_scores = model.pair_bin_scores[pair_index].squeeze()
             
-            feat1_nbins = len(model.feature_bins[col1_index])
-            feat2_nbins = len(model.feature_bins[col2_index])
             
-            grid = self._make_grid(np.arange(0, feat1_nbins+2), np.arange(0, feat2_nbins+2))
-            
-            # if is_feat1_cat_col and not is_feat2_cat_col:
-            #     pair_bin_scores = pair_bin_scores[grid[:, 0] > 0]
-            # elif not is_feat1_cat_col and is_feat2_cat_col:
-            #     pair_bin_scores = pair_bin_scores[grid[:, 1] > 0]
-            # else:
-            #     pair_bin_scores = pair_bin_scores[grid.prod(axis=1) > 0]
+            # Remove scores associated with missing bins
+            grid = self._make_grid(
+                np.arange(0, self.feature_sizes[col1_index]), 
+                np.arange(0, self.feature_sizes[col2_index])
+            )
+            if self.has_missing_bin[col1_index] and not self.has_missing_bin[col2_index]:
+                pair_bin_scores = pair_bin_scores[grid[:, 0] > 0]
+            elif not self.has_missing_bin[col1_index] and self.has_missing_bin[col2_index]:
+                pair_bin_scores = pair_bin_scores[grid[:, 1] > 0]
+            else:
+                pair_bin_scores = pair_bin_scores[grid.prod(axis=1) > 0]
             
             # Get bin values
-            if is_feat1_cat_col:
+            if self.feature_dtypes[col1_index] != 'continuous':
                 # feat1_bin_values = np.arange(-1, len(model.feature_bins[col1_index])+1)
                 feat1_bin_values = model.feature_bins[col1_index]
             else:
@@ -2274,7 +2148,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                     model.feature_bins[col1_index]
                 ])
                 
-            if is_feat2_cat_col:
+            if self.feature_dtypes[col2_index] != 'continuous':
                 # feat2_bin_values = np.arange(-1, len(model.feature_bins[col2_index])+1)
                 feat2_bin_values = model.feature_bins[col2_index]
             else:
@@ -2351,6 +2225,9 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         The number of hidden units in the hidden layers.
     max_bins : int, optional (default=32)
         The maximum number of bins for discretizing continuous features.
+    min_samples_per_bin : int, default=None
+        Minimum number of samples required in each bin.
+        Default is None which sets it to min(n_train_samples / 100, 50).
     validation_size : float, optional (default=0.2)
         The proportion of the dataset to include in the validation split.
     n_val_splits : int, optional (default=5)
@@ -2363,29 +2240,19 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         The batch size for training.
     device : str, optional (default="cpu")
         The device to run the model on ("cpu" or "cuda").
-    fit_pairs : bool, optional (default=True)
-        Whether to fit the model on pairs of features.
-    reg_param : float, optional (default=0)
-        The regularization parameter.
-    pair_reg_param : float, optional (default=0)
-        The regularization parameter for pairwise training.
-    entropy_param : float, optional (default=0)
-        The entropy regularization parameter.
     kernel_size : int, optional (default=5)
         The size of the kernel in convolutional layers for single features.
-    kernel_weight : float, optional (default=1)
+    kernel_weight : float, optional (default=3)
         The weight of the kernel for single feature convolutional layers.
     pair_kernel_size : int, optional (default=3)
         The size of the kernel for pairwise convolutional layers.
-    pair_kernel_weight : float, optional (default=1)
+    pair_kernel_weight : float, optional (default=3)
         The weight of the kernel for pairwise convolutional layers.
-    save_dir : str, optional
-        Directory path to save model outputs.
     monotone_constraints : list or None, optional (default=None)
         The monotonic constraints for the features.
         0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
         None means no constraints.
-    num_pairs : int, default=10
+    num_pairs : int, default=0
         Number of pairwise interactions to use in the model.
     verbosity : int, default=0
         Level of verbosity for logging.
@@ -2399,26 +2266,20 @@ class DNAMiteRegressor(BaseDNAMiteModel):
                  n_embed=32, 
                  n_hidden=32, 
                  max_bins=32, 
+                 min_samples_per_bin=None,
                  validation_size=0.2, 
                  n_val_splits=5, 
                  learning_rate=5e-4, 
                  max_epochs=100, 
                  batch_size=128, 
                  device="cpu", 
-                 fit_pairs=True, 
                  pairs_list=None,
-                 gamma=None,
-                 pair_gamma=None,
-                 reg_param=0, 
-                 pair_reg_param=0, 
-                 entropy_param=0, 
                  kernel_size=5, 
-                 kernel_weight=1, 
+                 kernel_weight=3, 
                  pair_kernel_size=3, 
-                 pair_kernel_weight=1, 
-                 save_dir=None,
+                 pair_kernel_weight=3, 
                  monotone_constraints=None,
-                 num_pairs=10,
+                 num_pairs=0,
                  verbosity=0,
                  random_state=None
     ):
@@ -2428,24 +2289,18 @@ class DNAMiteRegressor(BaseDNAMiteModel):
             n_hidden=n_hidden,
             n_output=1,
             max_bins=max_bins,
+            min_samples_per_bin=min_samples_per_bin,
             validation_size=validation_size,
             n_val_splits=n_val_splits,
             learning_rate=learning_rate,
             max_epochs=max_epochs,
             batch_size=batch_size,
             device=device,
-            fit_pairs=fit_pairs,
             pairs_list=pairs_list,
-            gamma=gamma,
-            pair_gamma=pair_gamma,
-            reg_param=reg_param,
-            pair_reg_param=pair_reg_param,
-            entropy_param=entropy_param,
             kernel_size=kernel_size,
             kernel_weight=kernel_weight,
             pair_kernel_size=pair_kernel_size,
             pair_kernel_weight=pair_kernel_weight,
-            save_dir=save_dir, 
             monotone_constraints=monotone_constraints,
             num_pairs=num_pairs,
             verbosity=verbosity,
@@ -2512,6 +2367,9 @@ class DNAMiteRegressor(BaseDNAMiteModel):
             optimizer.step()
 
             total_loss += loss.item()
+            
+        # Reset active feats
+        model.active_feats = active_feats
             
         return total_loss / len(train_loader)
     
@@ -2665,20 +2523,20 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         
         return super().get_shape_function(feature_name)
     
-    def plot_feature_importances(self, k=10, missing_bin="include"):
+    def plot_feature_importances(self, n_features=10, missing_bin="include"):
         """
         Plot a bar plot with the importance score for the top k features.
         
         Parameters
         ----------
-        k : int, default=10
+        n_features : int, default=10
             Number of features to plot.
             
         ignore_missing_bin : bool, default=False
             Whether to ignore the missing bin when computing the importance scores.
         """
         
-        return super().plot_feature_importances(k, missing_bin)
+        return super().plot_feature_importances(n_features, missing_bin)
     
     def plot_pair_shape_function(self, feat1_name, feat2_name):
         """
@@ -2725,7 +2583,18 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         
         return super().predict(X_test)
     
-    def select_features(self, X, y, partialed_feats=None):
+    def select_features(
+        self, 
+        X, 
+        y, 
+        reg_param,
+        select_pairs=False, 
+        partialed_feats=None,
+        gamma=None,
+        pair_gamma=None, 
+        pair_reg_param=0, 
+        entropy_param=0, 
+    ):
         """
         Perform feature selection. Selected features and pairs will be stored in model.selected_feats
         and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
@@ -2733,16 +2602,37 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         Parameters
         ----------
         X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
-            The input features for the model.
-            
+            The input features for the model.   
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
-            The labels, should be floats in (-inf, inf).
-            
+            The target variable. 
+        reg_param : float
+            Regularization parameter for feature-level regularization.
+        select_pairs : bool, default=False
+            Whether to select feature pairs in addition to individual features.
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
+        gamma : float, default=1
+            Regularization or scaling parameter; purpose depends on specific use in the model.
+        pair_gamma : float or None, default=None
+            Regularization or scaling parameter for feature pairs.
+            If None, defaults to gamma.
+        pair_reg_param : float, default=0
+            Regularization parameter for feature pairs.
+        entropy_param : float, default=0
+            Entropy parameter to control the diversity or uncertainty.
         """
         
-        return super().select_features(X, y, partialed_feats)
+        return super().select_features(
+            X, 
+            y, 
+            select_pairs=select_pairs, 
+            partialed_feats=partialed_feats,
+            gamma=gamma,
+            pair_gamma=pair_gamma,
+            reg_param=reg_param,
+            pair_reg_param=pair_reg_param,
+            entropy_param=entropy_param
+        )
     
     def score(self, X, y, y_train=None, model=None):
         """
@@ -2790,6 +2680,9 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         The number of hidden units in the hidden layers.
     max_bins : int, optional (default=32)
         The maximum number of bins for discretizing continuous features.
+    min_samples_per_bin : int, default=None
+        Minimum number of samples required in each bin.
+        Default is None which sets it to min(n_train_samples / 100, 50).
     validation_size : float, optional (default=0.2)
         The proportion of the dataset to include in the validation split.
     n_val_splits : int, optional (default=5)
@@ -2802,29 +2695,19 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         The batch size for training.
     device : str, optional (default="cpu")
         The device to run the model on ("cpu" or "cuda").
-    fit_pairs : bool, optional (default=True)
-        Whether to fit the model on pairs of features.
-    reg_param : float, optional (default=0)
-        The regularization parameter.
-    pair_reg_param : float, optional (default=0)
-        The regularization parameter for pairwise training.
-    entropy_param : float, optional (default=0)
-        The entropy regularization parameter.
     kernel_size : int, optional (default=5)
         The size of the kernel in convolutional layers for single features.
-    kernel_weight : float, optional (default=1)
+    kernel_weight : float, optional (default=3)
         The weight of the kernel for single feature convolutional layers.
     pair_kernel_size : int, optional (default=3)
         The size of the kernel for pairwise convolutional layers.
-    pair_kernel_weight : float, optional (default=1)
+    pair_kernel_weight : float, optional (default=3)
         The weight of the kernel for pairwise convolutional layers.
-    save_dir : str, optional
-        Directory path to save model outputs.
     monotone_constraints : list or None, optional (default=None)
         The monotonic constraints for the features.
         0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
         None means no constraints.
-    num_pairs : int, default=10
+    num_pairs : int, default=0
         Number of pairwise interactions to use in the model.
     verbosity : int, default=0
         Level of verbosity for logging.
@@ -2839,26 +2722,20 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
                  n_embed=32, 
                  n_hidden=32, 
                  max_bins=32, 
+                 min_samples_per_bin=None,
                  validation_size=0.2, 
                  n_val_splits=5, 
                  learning_rate=5e-4, 
                  max_epochs=100, 
                  batch_size=128, 
                  device="cpu", 
-                 fit_pairs=True, 
                  pairs_list=None,
-                 gamma=None,
-                 pair_gamma=None,
-                 reg_param=0, 
-                 pair_reg_param=0, 
-                 entropy_param=0, 
                  kernel_size=5, 
-                 kernel_weight=1, 
+                 kernel_weight=3, 
                  pair_kernel_size=3, 
-                 pair_kernel_weight=1, 
-                 save_dir=None,
+                 pair_kernel_weight=3, 
                  monotone_constraints=None,
-                 num_pairs=10,
+                 num_pairs=0,
                  verbosity=0,
                  random_state=None
     ):
@@ -2868,24 +2745,18 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             n_hidden=n_hidden,
             n_output=1,
             max_bins=max_bins,
+            min_samples_per_bin=min_samples_per_bin,
             validation_size=validation_size,
             n_val_splits=n_val_splits,
             learning_rate=learning_rate,
             max_epochs=max_epochs,
             batch_size=batch_size,
             device=device,
-            fit_pairs=fit_pairs,
             pairs_list=pairs_list,
-            gamma=gamma,
-            pair_gamma=pair_gamma,
-            reg_param=reg_param,
-            pair_reg_param=pair_reg_param,
-            entropy_param=entropy_param,
             kernel_size=kernel_size,
             kernel_weight=kernel_weight,
             pair_kernel_size=pair_kernel_size,
             pair_kernel_weight=pair_kernel_weight,
-            save_dir=save_dir, 
             monotone_constraints=monotone_constraints,
             num_pairs=num_pairs,
             verbosity=verbosity,
@@ -2951,6 +2822,9 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             optimizer.step()
 
             total_loss += loss.item()
+            
+        # Reset active feats
+        model.active_feats = active_feats
             
         return total_loss / len(train_loader)
     
@@ -3106,17 +2980,17 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         
         return super().get_shape_function(feature_name)
     
-    def plot_feature_importances(self, k=10, missing_bin="include"):
+    def plot_feature_importances(self, n_features=10, missing_bin="include"):
         """
         Plot a bar plot with the importance score for the top k features.
         
         Parameters
         ----------
-        k : int, default=10
+        n_features : int, default=10
             Number of features to plot.
         """
         
-        return super().plot_feature_importances(k, missing_bin=missing_bin)
+        return super().plot_feature_importances(n_features, missing_bin=missing_bin)
     
     def plot_pair_shape_function(self, feat1_name, feat2_name):
         """
@@ -3177,7 +3051,18 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         preds = self.predict(X_test)
         return 1 / (1 + np.exp(-preds))
     
-    def select_features(self, X, y, partialed_feats=None):
+    def select_features(
+        self, 
+        X, 
+        y, 
+        reg_param,
+        select_pairs=False, 
+        partialed_feats=None,
+        gamma=None,
+        pair_gamma=None, 
+        pair_reg_param=0, 
+        entropy_param=0, 
+    ):
         """
         Perform feature selection. Selected features and pairs will be stored in model.selected_feats
         and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
@@ -3185,16 +3070,37 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         Parameters
         ----------
         X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
-            The input features for the model.
-            
+            The input features for the model.   
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
-            The labels, should be label encoded as 0 and 1.
-            
+            The target variable. 
+        reg_param : float
+            Regularization parameter for feature-level regularization.
+        select_pairs : bool, default=False
+            Whether to select feature pairs in addition to individual features.
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
+        gamma : float, default=1
+            Regularization or scaling parameter; purpose depends on specific use in the model.
+        pair_gamma : float or None, default=None
+            Regularization or scaling parameter for feature pairs.
+            If None, defaults to gamma.
+        pair_reg_param : float, default=0
+            Regularization parameter for feature pairs.
+        entropy_param : float, default=0
+            Entropy parameter to control the diversity or uncertainty.
         """
         
-        return super().select_features(X, y, partialed_feats)
+        return super().select_features(
+            X, 
+            y, 
+            select_pairs=select_pairs, 
+            partialed_feats=partialed_feats,
+            gamma=gamma,
+            pair_gamma=pair_gamma,
+            reg_param=reg_param,
+            pair_reg_param=pair_reg_param,
+            entropy_param=entropy_param
+        )
     
     def score(self, X, y, y_train=None, model=None):
         """
@@ -3247,6 +3153,9 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         The number of hidden units in the hidden layers.
     max_bins : int, optional (default=32)
         The maximum number of bins for discretizing continuous features.
+    min_samples_per_bin : int, default=None
+        Minimum number of samples required in each bin.
+        Default is None which sets it to min(n_train_samples / 100, 50).
     validation_size : float, optional (default=0.2)
         The proportion of the dataset to include in the validation split.
     n_val_splits : int, optional (default=5)
@@ -3259,29 +3168,19 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         The batch size for training.
     device : str, optional (default="cpu")
         The device to run the model on ("cpu" or "cuda").
-    fit_pairs : bool, optional (default=True)
-        Whether to fit the model on pairs of features.
-    reg_param : float, optional (default=0)
-        The regularization parameter.
-    pair_reg_param : float, optional (default=0)
-        The regularization parameter for pairwise training.
-    entropy_param : float, optional (default=0)
-        The entropy regularization parameter.
     kernel_size : int, optional (default=5)
         The size of the kernel in convolutional layers for single features.
-    kernel_weight : float, optional (default=1)
+    kernel_weight : float, optional (default=3)
         The weight of the kernel for single feature convolutional layers.
     pair_kernel_size : int, optional (default=3)
         The size of the kernel for pairwise convolutional layers.
-    pair_kernel_weight : float, optional (default=1)
+    pair_kernel_weight : float, optional (default=3)
         The weight of the kernel for pairwise convolutional layers.
-    save_dir : str, optional
-        Directory path to save model outputs.
     monotone_constraints : list or None, optional (default=None)
         The monotonic constraints for the features.
         0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
         None means no constraints.
-    num_pairs : int, default=10
+    num_pairs : int, default=0
         Number of pairwise interactions to use in the model.
     verbosity : int, default=0
         Level of verbosity for logging.
@@ -3296,26 +3195,20 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
                  n_embed=32, 
                  n_hidden=32, 
                  max_bins=32, 
+                 min_samples_per_bin=None,
                  validation_size=0.2, 
                  n_val_splits=5, 
                  learning_rate=5e-4, 
                  max_epochs=100, 
                  batch_size=128, 
-                 device="cpu", 
-                 fit_pairs=True, 
+                 device="cpu",  
                  pairs_list=None,
-                 gamma=None,
-                 pair_gamma=None,
-                 reg_param=0, 
-                 pair_reg_param=0, 
-                 entropy_param=0, 
                  kernel_size=5, 
-                 kernel_weight=1, 
+                 kernel_weight=3, 
                  pair_kernel_size=3, 
-                 pair_kernel_weight=1, 
-                 save_dir=None,
+                 pair_kernel_weight=3, 
                  monotone_constraints=None,
-                 num_pairs=10,
+                 num_pairs=0,
                  verbosity=0,
                  random_state=None
     ):
@@ -3325,24 +3218,18 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             n_hidden=n_hidden,
             n_output=n_classes,
             max_bins=max_bins,
+            min_samples_per_bin=min_samples_per_bin,
             validation_size=validation_size,
             n_val_splits=n_val_splits,
             learning_rate=learning_rate,
             max_epochs=max_epochs,
             batch_size=batch_size,
             device=device,
-            fit_pairs=fit_pairs,
             pairs_list=pairs_list,
-            gamma=gamma,
-            pair_gamma=pair_gamma,
-            reg_param=reg_param,
-            pair_reg_param=pair_reg_param,
-            entropy_param=entropy_param,
             kernel_size=kernel_size,
             kernel_weight=kernel_weight,
             pair_kernel_size=pair_kernel_size,
             pair_kernel_weight=pair_kernel_weight,
-            save_dir=save_dir, 
             monotone_constraints=monotone_constraints,
             num_pairs=num_pairs,
             verbosity=verbosity,
@@ -3409,6 +3296,9 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
 
             total_loss += loss.item()
             
+        # Reset active feats
+        model.active_feats = active_feats    
+        
         return total_loss / len(train_loader)
     
     def test_epoch_mains(self, model, test_loader, on_partialed_set=False):
@@ -3601,17 +3491,17 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         
         return super().get_pair_shape_function(feat1_name, feat2_name)
     
-    def plot_feature_importances(self, k=10, missing_bin="include"):
+    def plot_feature_importances(self, n_features=10, missing_bin="include"):
         """
         Plot a bar plot with the importance score for the top k features.
         
         Parameters
         ----------
-        k : int, default=10
+        n_features : int, default=10
             Number of features to plot.
         """
         
-        return super().plot_feature_importances(k, missing_bin=missing_bin)
+        return super().plot_feature_importances(n_features, missing_bin=missing_bin)
     
     def plot_pair_shape_function(self, feat1_name, feat2_name):
         """
@@ -3664,7 +3554,18 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         
         return super().predict(X_test)
     
-    def select_features(self, X, y, partialed_feats=None):
+    def select_features(
+        self, 
+        X, 
+        y, 
+        reg_param,
+        select_pairs=False, 
+        partialed_feats=None,
+        gamma=None,
+        pair_gamma=None, 
+        pair_reg_param=0, 
+        entropy_param=0, 
+    ):
         """
         Perform feature selection. Selected features and pairs will be stored in model.selected_feats
         and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
@@ -3672,16 +3573,37 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         Parameters
         ----------
         X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
-            The input features for the model.
-            
+            The input features for the model.   
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
-            The labels, should be label encoded as 0, 1, ..., n_classes-1.
-            
+            The target variable.
+        reg_param : float
+            Regularization parameter for feature-level regularization. 
+        select_pairs : bool, default=False
+            Whether to select feature pairs in addition to individual features.
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
+        gamma : float, default=1
+            Regularization or scaling parameter; purpose depends on specific use in the model.
+        pair_gamma : float or None, default=None
+            Regularization or scaling parameter for feature pairs.
+            If None, defaults to gamma.
+        pair_reg_param : float, default=0
+            Regularization parameter for feature pairs.
+        entropy_param : float, default=0
+            Entropy parameter to control the diversity or uncertainty.
         """
         
-        return super().select_features(X, y, partialed_feats)
+        return super().select_features(
+            X, 
+            y, 
+            select_pairs=select_pairs, 
+            partialed_feats=partialed_feats,
+            gamma=gamma,
+            pair_gamma=pair_gamma,
+            reg_param=reg_param,
+            pair_reg_param=pair_reg_param,
+            entropy_param=entropy_param
+        )
     
     def score(self, X, y, y_train=None, model=None):
         """
@@ -3743,43 +3665,37 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         The learning rate for the optimizer.
     max_epochs : int, optional (default=100)
         The maximum number of epochs for training.
+    min_samples_per_bin : int, default=None
+        Minimum number of samples required in each bin.
+        Default is None which sets it to min(n_train_samples / 100, 50).
     batch_size : int, optional (default=128)
         The batch size for training.
     device : str, optional (default="cpu")
         The device to run the model on ("cpu" or "cuda").
-    fit_pairs : bool, optional (default=True)
-        Whether to fit the model on pairs of samples.
     pairs_list : list, optional
         A list of pairs for pairwise training, if applicable.
-    gamma : float, optional (default=1)
-        The gamma parameter for the loss function.
-    reg_param : float, optional (default=0)
-        The regularization parameter.
-    pair_reg_param : float, optional (default=0)
-        The regularization parameter for pairwise training.
-    entropy_param : float, optional (default=0)
-        The entropy regularization parameter.
     kernel_size : int, optional (default=5)
         The size of the kernel in convolutional layers.
-    kernel_weight : float, optional (default=1)
+    kernel_weight : float, optional (default=3)
         The weight of the kernel in convolutional layers.
     pair_kernel_size : int, optional (default=3)
         The size of the kernel for pairwise convolutional layers.
-    pair_kernel_weight : float, optional (default=1)
+    pair_kernel_weight : float, optional (default=3)
         The weight of the kernel for pairwise convolutional layers.
-    save_dir : str, optional
-        Directory path to save model outputs.
     monotone_constraints : list or None, optional (default=None)
         The monotonic constraints for the features.
         0 indicates no constraint, 1 indicates increasing, -1 indicates decreasing.
         None means no constraints.
-    num_pairs : int, default=10
+    num_pairs : int, default=0
         Number of pairwise interactions to use in the model.
     verbosity : int, default=0
         Level of verbosity for logging.
         0: Warning, 1: Info, 2: Debug
     random_state : int, optional
         Random seed for reproducibility.
+    censoring_estimator : str, optional (default="km")
+        The estimator to use for estimating the censoring distribution.
+        "km" for Kaplan-Meier, "cox" for Cox proportional hazards.
     """
 
     
@@ -3791,28 +3707,23 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         n_hidden=32, 
         n_layers=2,
         max_bins=32, 
+        min_samples_per_bin=None,
         validation_size=0.2, 
         n_val_splits=5, 
         learning_rate=5e-4, 
         max_epochs=100, 
         batch_size=128, 
         device="cpu", 
-        fit_pairs=True,
         pairs_list=None, 
-        gamma=None,
-        pair_gamma=None,
-        reg_param=0, 
-        pair_reg_param=0, 
-        entropy_param=0, 
         kernel_size=5, 
-        kernel_weight=1, 
+        kernel_weight=3, 
         pair_kernel_size=3, 
-        pair_kernel_weight=1, 
-        save_dir=None,
+        pair_kernel_weight=3, 
         monotone_constraints=None,
-        num_pairs=10,
+        num_pairs=0,
         verbosity=0,
-        random_state=None
+        random_state=None,
+        censor_estimator="km"
     ):
         super().__init__(
             n_features=n_features,
@@ -3821,29 +3732,26 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             n_output=n_eval_times,
             n_layers=n_layers,
             max_bins=max_bins,
+            min_samples_per_bin=min_samples_per_bin,
             validation_size=validation_size,
             n_val_splits=n_val_splits,
             learning_rate=learning_rate,
             max_epochs=max_epochs,
             batch_size=batch_size,
             device=device,
-            fit_pairs=fit_pairs,
             pairs_list=pairs_list,
-            gamma=gamma,
-            pair_gamma=pair_gamma,
-            reg_param=reg_param,
-            pair_reg_param=pair_reg_param,
-            entropy_param=entropy_param,
             kernel_size=kernel_size,
             kernel_weight=kernel_weight,
             pair_kernel_size=pair_kernel_size,
             pair_kernel_weight=pair_kernel_weight,
-            save_dir=save_dir,
             monotone_constraints=monotone_constraints,
             num_pairs=num_pairs, 
             verbosity=verbosity,
             random_state=random_state
         )
+        
+        self.censor_estimator = censor_estimator
+        assert self.censor_estimator in ["km", "cox"], "censor_estimator must be 'km' or 'cox'"
         
     def _set_gamma(self, X):
         
@@ -3855,8 +3763,70 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         if self.pair_gamma is None:
             self.pair_gamma = self.gamma / 4
             
+    def _fit_censoring_distribution(self, y, X=None):
+        assert self.censor_estimator == "km" or X is not None, "if censor_estimator is cox, X must be provided."
         
-    def get_data_loader(self, X, y, pairs=None, shuffle=True):
+        if self.censor_estimator == "km":
+            self.logger.debug("Fitting Kaplan-Meier estimator for censoring distribution.")
+            self.cde = CensoringDistributionEstimator()
+            self.cde.fit(y)
+            self.logger.debug("Finished fitting Kaplan-Meier estimator for censoring distribution.")
+        else:
+            self.logger.debug("Fitting Cox proportional hazards model for censoring distribution.")
+            self.cde = CoxPHSurvivalAnalysis(alpha=1e-3)
+            
+            # Definte preprocessor so that Cox model can fit successfully
+            from sklearn.compose import make_column_transformer
+            from sklearn.pipeline import make_pipeline
+            from sklearn.preprocessing import StandardScaler, OneHotEncoder
+            from sklearn.impute import SimpleImputer
+            
+            self.censor_cox_preprocessor = make_column_transformer(
+                (make_pipeline(
+                    StandardScaler(),
+                    SimpleImputer(strategy="constant", fill_value=0)
+                ), X.select_dtypes(include=["number"]).columns),
+                (make_pipeline(
+                    SimpleImputer(strategy="constant", fill_value="NA"),
+                    OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+                ), X.select_dtypes(include=["object"]).columns),
+                verbose_feature_names_out=False
+            ).set_output(transform="pandas")
+            X_preprocessed = self.censor_cox_preprocessor.fit_transform(X)
+                
+            # Fit on inverse of y to fit to censoring distribution
+            y_censor = y.copy()
+            y_censor["event"] = ~y_censor["event"]
+            self.cde.fit(X_preprocessed, y_censor)
+            self.logger.debug("Finished fitting Cox proportional hazards model for censoring distribution.")
+            
+        return
+
+    # Set the pcw_obs_times
+    # This needs to be done before training the model
+    # So that unprocessed X's can be used
+    def _set_pcw_obs_times(self, y_train=None, y_val=None, y_test=None, X_train=None, X_val=None, X_test=None):
+        if y_train is not None:
+            self.pcw_obs_times_train = self._predict_censoring_distribution(y_train["time"], X_train) + 1e-5
+        if y_val is not None:
+            self.pcw_obs_times_val = self._predict_censoring_distribution(y_val["time"], X_val) + 1e-5
+        if y_test is not None:
+            self.pcw_obs_times_test = self._predict_censoring_distribution(y_test["time"], X_test) + 1e-5
+        return
+
+    # Predict the survival probabilities of the censoring distribution
+    def _predict_censoring_distribution(self, times, X=None):
+        assert self.censor_estimator == "km" or X is not None, "if censor_estimator is cox, X must be provided."
+        
+        if self.censor_estimator == "km":
+            return self.cde.predict_proba(times)
+        else:
+            X_preprocessed = self.censor_cox_preprocessor.transform(X)
+            surv_fns = self.cde.predict_survival_function(X_preprocessed)
+            return np.array([fn(time) for fn, time in zip(surv_fns, times)])
+            
+        
+    def get_data_loader(self, X, y, pcw_obs_times, pairs=None, shuffle=True):
         
         assert "time" in y.dtype.names and "event" in y.dtype.names, \
             "y must be a structured array with 'time' and 'event' fields."
@@ -3868,7 +3838,8 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             if hasattr(pairs, 'values'):
                 pairs = pairs.values
 
-        pcw_obs_times = self.cde.predict_proba(y["time"]) + 1e-5
+        # pcw_obs_times = self.cde.predict_proba(y["time"]) + 1e-5
+        # pcw_obs_times = self._predict_censoring_distribution(y["time"], X) + 1e-5
 
         if pairs is not None:
             dataset = torch.utils.data.TensorDataset(
@@ -3931,6 +3902,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
 
             total_loss += loss.item()
             
+        # Reset active feats
         model.active_feats = active_feats
         
         return total_loss / len(train_loader)
@@ -4046,7 +4018,18 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
         return total_loss / len(test_loader), torch.cat(preds)   
     
-    def select_features(self, X, y, partialed_feats=None):
+    def select_features(
+        self, 
+        X, 
+        y, 
+        reg_param,
+        select_pairs=False, 
+        partialed_feats=None,
+        gamma=None,
+        pair_gamma=None, 
+        pair_reg_param=0, 
+        entropy_param=0, 
+    ):
         """
         Perform feature selection. Selected features and pairs will be stored in model.selected_feats
         and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
@@ -4054,19 +4037,29 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         Parameters
         ----------
         X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
-            The input features for the model.
-            
-        y : structured np.array of shape (n_samples,) with dtype [("event", bool), ("time", float)]
-            Survival labels.
-            Event: True if event occurred, False if censored.
-            Time: Time to event or time of censoring.
-            
+            The input features for the model.   
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The target variable.
+        reg_param : float
+            Regularization parameter for feature-level regularization.
+        select_pairs : bool, default=False
+            Whether to select feature pairs in addition to individual features.
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
+        gamma : float, default=1
+            Regularization or scaling parameter; purpose depends on specific use in the model.
+        pair_gamma : float or None, default=None
+            Regularization or scaling parameter for feature pairs.
+            If None, defaults to gamma.
+        pair_reg_param : float, default=0
+            Regularization parameter for feature pairs.
+        entropy_param : float, default=0
+            Entropy parameter to control the diversity or uncertainty.
         """
         
-        self.cde = CensoringDistributionEstimator()
-        self.cde.fit(y)
+        # self.cde = CensoringDistributionEstimator()
+        # self.cde.fit(y)
+        self._fit_censoring_distribution(y, X)
     
         # Get evaluation times before train/val split
         quantiles = torch.quantile(
@@ -4081,9 +4074,37 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             self.eval_times = self.eval_times.unique()
             self.n_output = len(self.eval_times)
         
-        self.pcw_eval_times = torch.FloatTensor(self.cde.predict_proba(self.eval_times.cpu().numpy())).to(self.device) + 1e-5
+        self.pcw_eval_times = torch.FloatTensor(self._predict_censoring_distribution(self.eval_times.cpu().numpy(), X)).to(self.device) + 1e-5
         
-        return super().select_features(X, y, partialed_feats=partialed_feats)
+        # Get the observed pcw times for the first split
+        self.pcw_obs_times = []
+        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=self.validation_size, random_state=self.random_state)
+        self.pcw_obs_times.append({
+            "train": self._predict_censoring_distribution(y_train["time"], X_train) + 1e-5,
+            "val": self._predict_censoring_distribution(y_val["time"], X_val) + 1e-5
+        })
+        
+        return super().select_features(
+            X, 
+            y, 
+            select_pairs=select_pairs, 
+            partialed_feats=partialed_feats,
+            gamma=gamma,
+            pair_gamma=pair_gamma,
+            reg_param=reg_param,
+            pair_reg_param=pair_reg_param,
+            entropy_param=entropy_param
+        )
+    
+    def _select_features(self, X, y, partialed_feats=None, model=None):
+        return super()._select_features(
+            X, 
+            y, 
+            partialed_feats, 
+            model, 
+            train_loader_args={"pcw_obs_times": self.pcw_obs_times[0]["train"]},
+            val_loader_args={"pcw_obs_times": self.pcw_obs_times[0]["val"]}
+        )
     
     def fit(self, X, y, partialed_feats=None):
         """
@@ -4105,8 +4126,10 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         assert y.dtype.names is not None, "y must be a structured array with 'time' and 'event' fields."
         assert "time" in y.dtype.names and "event" in y.dtype.names, "y must be a structured array with 'time' and 'event' fields."
         
-        self.cde = CensoringDistributionEstimator()
-        self.cde.fit(y)
+        # self.cde = CensoringDistributionEstimator()
+        # self.cde.fit(y)
+        if not hasattr(self, "cde"):
+            self._fit_censoring_distribution(y, X)
     
         # Get evaluation times before train/val split
         quantiles = torch.quantile(
@@ -4121,11 +4144,32 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             self.eval_times = self.eval_times.unique()
             self.n_output = len(self.eval_times)
         
-        self.pcw_eval_times = torch.FloatTensor(self.cde.predict_proba(self.eval_times.cpu().numpy())).to(self.device) + 1e-5
+        self.pcw_eval_times = torch.FloatTensor(self._predict_censoring_distribution(self.eval_times.cpu().numpy(), X)).to(self.device) + 1e-5
+        
+        self.pcw_obs_times = []
+        for i in range(self.n_val_splits):
+            X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=self.validation_size, random_state=self.random_state+i)
+            self.pcw_obs_times.append({
+                "train": self._predict_censoring_distribution(y_train["time"], X_train) + 1e-5,
+                "val": self._predict_censoring_distribution(y_val["time"], X_val) + 1e-5
+            })
+        
         
         super().fit(X, y, partialed_feats=partialed_feats)
         
         return
+    
+    def _fit_one_split(self, X_train, y_train, X_val, y_val, random_state=None, partialed_indices=None):
+        return super()._fit_one_split(
+            X_train, 
+            y_train, 
+            X_val, 
+            y_val, 
+            random_state, 
+            partialed_indices, 
+            train_loader_args={"pcw_obs_times": self.pcw_obs_times[random_state-self.random_state]["train"]},
+            val_loader_args={"pcw_obs_times": self.pcw_obs_times[random_state-self.random_state]["val"]}
+        )
     
     def get_feature_importances(self, eval_time=None, missing_bin="include"):
         """
@@ -4199,13 +4243,13 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             self.importances = pd.DataFrame(importances, columns=["split", "feature", "importance", "n_bins"])
         return self.importances
     
-    def plot_feature_importances(self, k=10, eval_times=None, missing_bin="include"):
+    def plot_feature_importances(self, n_features=10, eval_times=None, missing_bin="include"):
         """
         Plot a bar plot with the importance score for the top k features.
         
         Parameters
         ----------
-        k : int, default=10
+        n_features : int, default=10
             Number of features to plot.
             
         eval_time : float, list or None, default=None
@@ -4217,7 +4261,8 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         """
         
         num_eval_times = len(eval_times) if isinstance(eval_times, list) else 1
-        fig, axes = plt.subplots(1, num_eval_times, figsize=(4*num_eval_times, 4))
+        fig, axes = plt.subplots(1, num_eval_times, figsize=((8 if missing_bin == "stratify" else 6)*num_eval_times, 4))
+        # plt.figure(figsize=(8 if missing_bin == "stratify" else 6, 4))
         
         if not isinstance(eval_times, list):
             eval_times = [eval_times]
@@ -4226,35 +4271,81 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             feat_imps = self.get_feature_importances(eval_time=et, missing_bin=missing_bin)
             
             if missing_bin == "stratify":
+                
+                
                 feat_means = feat_imps.groupby(["feature", "bin_type"])["importance"].mean().reset_index()
                 feat_means = feat_means.pivot(index="feature", columns="bin_type", values="importance").reset_index()
-                feat_means = feat_means.sort_values(by="observed", ascending=False).head(10)
-                feat_means = feat_means.melt(id_vars="feature", value_vars=["observed", "missing"], 
-                                            var_name="bin_type", value_name='importance')
-
-                feat_sems = feat_imps.groupby(["feature", "bin_type"])["importance"].agg(["sem"]).reset_index()
-                feat_imps = feat_means.merge(feat_sems, on=["feature", "bin_type"])
-                sns.barplot(
-                    x="importance",
-                    y="feature",
-                    hue="bin_type",
-                    data=feat_imps,
-                    xerr=1.96 * feat_imps["sem"].values.reshape(2, -1),
-                    orient="h",
-                    ax=axes[i]
-                )
+                feat_means = feat_means.sort_values(by="observed", ascending=True).tail(n_features)
+                
+                if self.n_val_splits == 1:
+                    axes[i].barh(feat_means["feature"], feat_means["observed"], color=sns.color_palette()[0])
+                    axes[i].barh(feat_means["feature"], -1*feat_means["missing"], color=sns.color_palette()[1])
+                else:
+                    feat_sems = feat_imps.groupby(["feature", "bin_type"])["importance"].agg(["sem"]).reset_index()
+                    feat_sems = feat_sems.pivot(index="feature", columns="bin_type", values="sem").reset_index()
+                    feat_imps = feat_means.merge(feat_sems, on="feature", suffixes=("", "_sem"))
+                    axes[i].barh(
+                        y=feat_imps["feature"],
+                        width=feat_imps["observed"],
+                        xerr=1.96 * feat_imps["observed_sem"],
+                    )
+                    axes[i].barh(
+                        y=feat_imps["feature"],
+                        width=-1*feat_imps["missing"],
+                        xerr=1.96 * feat_imps["missing_sem"],
+                        color=sns.color_palette()[1]
+                    )
+                
+                
+                # feat_means = feat_imps.groupby(["feature", "bin_type"])["importance"].mean().reset_index()
+                # feat_means = feat_means.pivot(index="feature", columns="bin_type", values="importance").reset_index()
+                # feat_means = feat_means.sort_values(by="observed", ascending=False).head(n_features)
+                # feat_means = feat_means.melt(id_vars="feature", value_vars=["observed", "missing"], 
+                #                             var_name="bin_type", value_name='importance')
+                
+                # if self.n_val_splits == 1:
+                #     sns.barplot(
+                #         x="importance",
+                #         y="feature",
+                #         hue="bin_type",
+                #         data=feat_means,
+                #         orient="h",
+                #         ax=axes[i]
+                #     )
+                # else:
+                #     feat_sems = feat_imps.groupby(["feature", "bin_type"])["importance"].agg(["sem"]).reset_index()
+                #     feat_imps = feat_means.merge(feat_sems, on=["feature", "bin_type"])
+                #     sns.barplot(
+                #         x="importance",
+                #         y="feature",
+                #         hue="bin_type",
+                #         data=feat_imps,
+                #         xerr=1.96 * feat_imps["sem"].values.reshape(2, -1),
+                #         orient="h",
+                #         ax=axes[i]
+                #     )
+                    
                 axes[i].set_ylabel("")
 
                 # Change title of legend
-                axes[i].set_legend(title="Importance Type")
+                axes[i].legend(["Observed", "Missing"], title="Importance Type")
                 axes[i].set_title(f"Feature Importances (stratified) at t={et}")
+                
+                xticks = axes[i].get_xticks()
+                xticklabels = [round(abs(x), 2) for x in xticks]
+                axes[i].set_xticks(xticks)
+                axes[i].set_xticklabels(xticklabels)
                 
             else:
             
                 top_k_features = feat_imps.groupby("feature")["importance"].agg(["mean", "sem"])
-                top_k_features = top_k_features.sort_values("mean", ascending=True).tail(k)
+                top_k_features = top_k_features.sort_values("mean", ascending=True).tail(n_features)
 
-                axes[i].barh(top_k_features.index, top_k_features["mean"], xerr=1.96*top_k_features["sem"])
+                if self.n_val_splits == 1:
+                    axes[i].barh(top_k_features.index, top_k_features["mean"])
+                else:
+                    axes[i].barh(top_k_features.index, top_k_features["mean"], xerr=1.96*top_k_features["sem"])
+                    
                 axes[i].set_title(f"Feature Importances ({missing_bin}) at t={et}")
 
         plt.tight_layout()
@@ -4331,8 +4422,6 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             Only applicable for continuous features.
         """
         
-        yaxis_label = r"Contribution to logit($P(T \leq t | X)$)"
-        
         if isinstance(feature_names, str):
             feature_names = [feature_names]
             
@@ -4386,6 +4475,8 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
         for eval_idx, eval_time in enumerate(eval_times):
             ax_idx = 0
+            yaxis_label = f"Contribution to logit($P(T \leq {eval_time} | X)$)"
+            
             for feature_name in feature_names:
                 
                 is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
@@ -4480,9 +4571,6 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
         eval_index = np.searchsorted(self.eval_times.cpu().numpy(), eval_time)
         
-        is_feat1_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feat1_name)] != 'continuous'
-        is_feat2_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feat2_name)] != 'continuous'
-        
         bin_scores = []
         bin_values = []
         for i, model in enumerate(self.models):
@@ -4509,30 +4597,28 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             # grid = self._make_grid(np.arange(0, feat1_nbins+2), np.arange(0, feat2_nbins+2))
             grid = self._make_grid(np.arange(0, feat1_nbins), np.arange(0, feat2_nbins))
             
-            # if is_feat1_cat_col and not is_feat2_cat_col:
-            #     pair_bin_scores = pair_bin_scores[grid[:, 0] > 0]
-            # elif not is_feat1_cat_col and is_feat2_cat_col:
-            #     pair_bin_scores = pair_bin_scores[grid[:, 1] > 0]
-            # else:
-            #     pair_bin_scores = pair_bin_scores[grid.prod(axis=1) > 0]
-        
-            # pair_bin_scores = pair_bin_scores[grid.prod(axis=1) > 0]
+            if self.has_missing_bin[col1_index] and not self.has_missing_bin[col2_index]:
+                pair_bin_scores = pair_bin_scores[grid[:, 0] > 0]
+            elif not self.has_missing_bin[col1_index] and self.has_missing_bin[col2_index]:
+                pair_bin_scores = pair_bin_scores[grid[:, 1] > 0]
+            else:
+                pair_bin_scores = pair_bin_scores[grid.prod(axis=1) > 0]
             
             # Get bin values
-            if is_feat1_cat_col:
+            if self.feature_dtypes[col1_index] != 'continuous':
+                # feat1_bin_values = np.arange(-1, len(model.feature_bins[col1_index])+1)
                 feat1_bin_values = model.feature_bins[col1_index]
             else:
                 feat1_bin_values = np.concatenate([
-                    [np.nan],
                     [model.feature_bins[col1_index].min() - 0.01],
                     model.feature_bins[col1_index]
                 ])
                 
-            if is_feat2_cat_col:
+            if self.feature_dtypes[col2_index] != 'continuous':
+                # feat2_bin_values = np.arange(-1, len(model.feature_bins[col2_index])+1)
                 feat2_bin_values = model.feature_bins[col2_index]
             else:
                 feat2_bin_values = np.concatenate([
-                    [np.nan],
                     [model.feature_bins[col2_index].min() - 0.01],
                     model.feature_bins[col2_index]
                 ])
@@ -4607,7 +4693,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         y_test = np.zeros(X_test_discrete.shape[0], dtype=[("event", "?"), ("time", "f8")])
         
         if not self.fit_pairs:
-            test_loader = self.get_data_loader(X_test_discrete, y_test, shuffle=False)
+            test_loader = self.get_data_loader(X_test_discrete, y_test, shuffle=False, pcw_obs_times=self.pcw_obs_times_test)
             test_preds = np.zeros((len(models), X_test_discrete.shape[0], self.n_output))
             for i, model in enumerate(models):
                 _, model_preds = self.test_epoch_mains(model, test_loader)
@@ -4615,7 +4701,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                 
         else:
             X_test_interactions = X_test_discrete.values[:, pairs_list]
-            test_loader = self.get_data_loader(X_test_discrete, y_test, pairs=X_test_interactions, shuffle=False)
+            test_loader = self.get_data_loader(X_test_discrete, y_test, pairs=X_test_interactions, shuffle=False, pcw_obs_times=self.pcw_obs_times_test)
             test_preds = np.zeros((len(models), X_test_discrete.shape[0], self.n_output))
             for i, model in enumerate(models):
                 _, model_preds = self.test_epoch_pairs(model, test_loader)
@@ -4633,6 +4719,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             The input features for prediction.
         
         """
+        self._set_pcw_obs_times(y_test=np.zeros(X_test.shape[0], dtype=[("event", "?"), ("time", "f8")]), X_test=X_test)
         X_test_discrete = self._discretize_data(X_test)
         return self._predict(X_test_discrete, self.models)
     
@@ -4808,7 +4895,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
         return np.array(predicted), np.array(observed), quantiles
     
-    def make_calibration_plot(self, X, y, eval_time, n_bins=10, binning_method="quantile"):
+    def make_calibration_plot(self, X, y, eval_times, n_bins=10, binning_method="quantile"):
         """
         Make a calibration plot to assess the calibration of the model at a given evaluation time.
         
@@ -4820,8 +4907,8 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         y : structured np.array of shape (n_samples,) with dtype [("event", bool), ("time", float)]
             Survival labels for corresponding to X.
             
-        eval_time : float
-            Evaluation time to assess calibration at.
+        eval_times : float or list of float
+            Evaluation time(s) to assess calibration at.
             
         n_bins : int, optional (default=10)
             Number of bins to use for binned Kaplan-Meier estimate.
@@ -4830,12 +4917,16 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             Method for binning predictions. Options are "quantile" or "uniform".
         """
         
-        predicted, observed, quantiles = self.get_calibration_data(X, y, eval_time, n_bins=n_bins, binning_method=binning_method)
+        fig, axes = plt.subplots(1, len(eval_times), figsize=(4*len(eval_times), 4))
         
-        plt.figure(figsize=(6, 4))
-        plt.plot(predicted, observed, marker='o')
-        plt.plot([0, 1], [0, 1], linestyle='--', color='black')
-        plt.xlabel("Predicted")
-        plt.ylabel("Observed")
-        plt.title(f"Calibration at {eval_time}")
+        for eval_time, ax in zip(eval_times, axes):
+        
+            predicted, observed, quantiles = self.get_calibration_data(X, y, eval_time, n_bins=n_bins, binning_method=binning_method)
+            
+            ax.plot(predicted, observed, marker='o')
+            ax.plot([predicted[0],  predicted[-1]], [predicted[0], predicted[-1]], linestyle='--', color='black')
+            ax.set_xlabel(r"$\hat{P}(T \leq $" + str(eval_time) + r"$ \mid X)$")
+            ax.set_ylabel("Binned KM Estimate")
+            ax.set_title(f"Calibration at t={eval_time}")
+            
         plt.tight_layout()

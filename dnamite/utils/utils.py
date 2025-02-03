@@ -6,18 +6,22 @@ from sksurv.nonparametric import kaplan_meier_estimator
 from tqdm import tqdm
 import os
 
-def discretize(x, max_bins, bins=None):
-    """
-    # Function to discretize a feature into bins
-    # Based on the binning method used in EBMs in interpret package
-    # x: feature to discretize
-    # max_bins: maximum number of bins
-    # bins: optional bins to use
-    """
+
+
+# Function to discretize a feature into bins
+# Based on the binning method used in EBMs in interpret package
+# x: feature to discretize
+# max_bins: maximum number of bins
+# min_samples_per_bin: minimum number of samples per bin
+# bins: optional bins to use
+def discretize(x, max_bins, bins=None, min_samples_per_bin=None):
     
     # Convert x to numpy if pandas
     if isinstance(x, pd.Series):
         x = x.values
+        
+    if min_samples_per_bin is None:
+        min_samples_per_bin = min(0.01*x.shape[0], 50)
         
     # Convert to float if not float
     if x.dtype != np.float64:
@@ -35,7 +39,7 @@ def discretize(x, max_bins, bins=None):
             processing="quantile",
             binning=None,
             max_bins=max_bins,
-            min_samples_bin=min(0.01*x.shape[0], 50),
+            min_samples_bin=min_samples_per_bin,
         )
     
     # Discretize using interpret's native discretize function
