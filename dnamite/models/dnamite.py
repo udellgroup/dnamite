@@ -1171,7 +1171,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         X_val, 
         y_val, 
         random_state=None, 
-        partialed_indices=None, 
+        partialed_feats=None, 
         train_loader_args={},
         val_loader_args={},
     ):
@@ -1199,6 +1199,11 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             pairs_list = self.pairs_list
             # pairs_list = None
             feature_sizes = self.feature_sizes
+            
+        if partialed_feats is not None:
+            partialed_indices = [X_train.columns.get_loc(feat) for feat in partialed_feats]
+        else:
+            partialed_indices = None
         
         # Get data loaders
         self.logger.debug("GETTING DATA LOADERS")
@@ -1244,7 +1249,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                 self.max_epochs,
                 mains=True,
             )
-            model.active_feats = torch.arange(self.n_features).to(self.device)
+            model.active_feats = torch.arange(len(X_train.columns)).to(self.device)
             
             # Get data loaders
             train_loader = self.get_data_loader(X_train, y_train, **train_loader_args)
@@ -1281,7 +1286,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         if pairs_list is None:
             # No pairs have been selected already, so do a round of pair selection
-            self.select_pairs(model, X_train, y_train, X_val, y_val, self.num_pairs)
+            self._select_pairs(model, X_train, y_train, X_val, y_val, self.num_pairs, train_loader_args, val_loader_args)
             pairs_list = self.pairs_list
             model.selected_pair_indices = pairs_list # list version
             model.pairs_list = torch.LongTensor(pairs_list).to(self.device) # tensor version
@@ -1479,9 +1484,10 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         self.logger.info(f"Number of main features selected: {len(model.active_feats)}")
         
+        
         if not self.fit_pairs:
             self.selected_feats = self.feature_names_in_[model.active_feats.cpu().numpy()].tolist()
-            val_score = self.score(pd.DataFrame(X_val, columns=self.feature_names_in_), y_val, y_train, model=model)
+            val_score = self._score(pd.DataFrame(X_val, columns=self.feature_names_in_), y_val, y_train, model=model)
             # val_score = {"Test": 0}
             return best_val_loss, val_score, model
 
@@ -1577,28 +1583,17 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             
         return feats, pd.DataFrame({"num_feats": num_feats, "val_loss": losses, f"val_{val_score_name}": scores})
     
-    def select_pairs(self, model, X_train, y_train, X_val, y_val, num_pairs=10):
-        """
-        Select only pairs for a model that uses all features.
-        Uses heuristic method of selecting the top k pairs based on the pair scores.
-        
-        
-        Parameters
-        ----------
-        model : _BaseSingleSplitDNAMiteModel
-            A single split DNAMite model that has already been trained on individual features.
-        
-        X_train : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
-        
-        y_train : pandas.Series or numpy.ndarray, shape (n_samples,)
-        
-        X_val : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
-        
-        y_val : pandas.Series or numpy.ndarray, shape (n_samples,)
-        
-        num_pairs : int, default=10
-            The number of pairs to select.
-        """
+    def _select_pairs(
+        self, 
+        model, 
+        X_train, 
+        y_train, 
+        X_val, 
+        y_val, 
+        num_pairs=10,
+        train_loader_args={},
+        val_loader_args={},
+    ):
         
         # Set random seed if one is provided
         if self.random_state is not None:
@@ -1614,7 +1609,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         pairs_list = list(combinations(range(X_train.shape[1]), 2))
         
         pair_scores = self._score_pairs(
-            model, X_train, y_train, X_val, y_val, pair_reg_param, pair_gamma
+            model, X_train, y_train, X_val, y_val, pair_reg_param, pair_gamma, train_loader_args, val_loader_args
         )
         
         # Check number of non-zeros in pair scores
@@ -1637,7 +1632,18 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         return
         
-    def _score_pairs(self, model, X_train, y_train, X_val, y_val, pair_reg_param, pair_gamma):
+    def _score_pairs(
+        self, 
+        model, 
+        X_train, 
+        y_train, 
+        X_val, 
+        y_val, 
+        pair_reg_param, 
+        pair_gamma,
+        train_loader_args={},
+        val_loader_args={},
+    ):
         
         model = copy.deepcopy(model)
         
@@ -1654,8 +1660,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         X_train_interactions = X_train.values[:, pairs_list]
         X_val_interactions = X_val.values[:, pairs_list]
         
-        train_loader = self.get_data_loader(X_train, y_train, pairs=X_train_interactions)
-        val_loader = self.get_data_loader(X_val, y_val, pairs=X_val_interactions, shuffle=False)
+        train_loader = self.get_data_loader(X_train, y_train, pairs=X_train_interactions, **train_loader_args)
+        val_loader = self.get_data_loader(X_val, y_val, pairs=X_val_interactions, shuffle=False, **val_loader_args)
         
         optimizer = torch.optim.Adam(
             [p for p in model.parameters() if p.requires_grad], 
@@ -1702,11 +1708,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             else:
                 self.logger.warning("Found selected features. Using only those features.")
         
-        if partialed_feats is not None:
-            partialed_indices = [X.columns.get_loc(feat) for feat in partialed_feats]
-        else:
-            partialed_indices = None
-        
         self.feature_names_in_ = X.columns
         
         # First discretize the data
@@ -1720,7 +1721,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             X_train, X_val, y_train, y_val = train_test_split(X_discrete, y, test_size=self.validation_size, random_state=self.random_state+i)
             
             # Fit to this split
-            model = self._fit_one_split(X_train, y_train, X_val, y_val, random_state=self.random_state+i, partialed_indices=partialed_indices)
+            model = self._fit_one_split(X_train, y_train, X_val, y_val, random_state=self.random_state+i, partialed_feats=partialed_feats)
             
             self.models.append(model)
             
@@ -1784,10 +1785,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         return self._predict(X_test_discrete, self.models)
     
-    def score(self, X, y, y_train=None):
-        raise NotImplementedError("Scoring is only implemented for child classes.")
-    
-    def _score_from_preds(self, y_preds, y, y_train=None):
+    def _score(self, X, y, y_train=None):
         raise NotImplementedError("Scoring is only implemented for child classes.")
     
     def get_feature_importances(self, missing_bin="include"):
@@ -1796,12 +1794,16 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         Parameters
         ----------
-        ignore_missing_bin : bool, default=False
-            Whether to ignore the missing bin when computing the importance scores.
+        missing_bin : str, default="include"
+            How to handle missing bin when calculating feature importances:
+            
+            - "include" - include the missing bin.
+            - "ignore" - ignore the missing bin.
+            - "stratify" - calculate separate importances for missing and non-missing bins.
             
         Returns
         -------
-        importances : pandas.DataFrame
+        pandas.DataFrame
             A DataFrame containing the feature importance scores for each feature.
         """
         
@@ -1850,17 +1852,18 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
     def plot_feature_importances(self, n_features=10, missing_bin="include"):
         """
         Plot a bar plot with the importance score for the top k features.
-        
+
         Parameters
         ----------
         n_features : int, default=10
             Number of features to plot.
             
         missing_bin : str, default="include"
-            How to handle missing bin when calculating feature importances
-            "include" - include the missing bin.
-            "ignore" - ignore the missing bin.
-            "stratify" - calculate separate importances for missing and non-missing bins.
+            How to handle missing bin when calculating feature importances:
+            
+            - "include" - include the missing bin.
+            - "ignore" - ignore the missing bin.
+            - "stratify" - calculate separate importances for missing and non-missing bins.
         """
         
         plt.figure(figsize=(8 if missing_bin == "stratify" else 6, 4))
@@ -1927,7 +1930,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             
         Returns
         -------
-        df : pandas.DataFrame
+        pandas.DataFrame
             A DataFrame containing the bin scores for the feature.
         """
         
@@ -2103,7 +2106,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         Returns
         -------
-        pair_data_dnamite : pandas.DataFrame
+        pandas.DataFrame
             A DataFrame containing the shape function data for the interaction effect.
         """
         
@@ -2207,9 +2210,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         sns.heatmap(pair_data_dnamite)
         
         plt.tight_layout()
-        
-    def score(self, X, y):
-        raise NotImplementedError("Scoring is implemented for base class.")
       
 class DNAMiteRegressor(BaseDNAMiteModel):
     """
@@ -2240,6 +2240,11 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         The batch size for training.
     device : str, optional (default="cpu")
         The device to run the model on ("cpu" or "cuda").
+    pairs_list : list of tuple[int, int], optional
+        List of pairs to use in the model.
+        Each entry should be a pair of indices corresponding to the features.
+        Should only be set if manual pair selection is desired.
+        Set num_pairs instead for automatic pair selection.
     kernel_size : int, optional (default=5)
         The size of the kernel in convolutional layers for single features.
     kernel_weight : float, optional (default=3)
@@ -2475,12 +2480,16 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         
         Parameters
         ----------
-        ignore_missing_bin : bool, default=False
-            Whether to ignore the missing bin when computing the importance scores.
+        missing_bin : str, default="include"
+            How to handle missing bin when calculating feature importances:
+            
+            - "include" - include the missing bin.
+            - "ignore" - ignore the missing bin.
+            - "stratify" - calculate separate importances for missing and non-missing bins.
             
         Returns
         -------
-        importances : pandas.DataFrame
+        pandas.DataFrame
             A DataFrame containing the feature importance scores for each feature.
         """
         
@@ -2500,7 +2509,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         
         Returns
         -------
-        pair_data_dnamite : pandas.DataFrame
+        pandas.DataFrame
             A DataFrame containing the shape function data for the interaction effect.
         """
         
@@ -2517,7 +2526,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
             
         Returns
         -------
-        df : pandas.DataFrame
+        pandas.DataFrame
             A DataFrame containing the bin scores for the feature.
         """
         
@@ -2532,8 +2541,12 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         n_features : int, default=10
             Number of features to plot.
             
-        ignore_missing_bin : bool, default=False
-            Whether to ignore the missing bin when computing the importance scores.
+        missing_bin : str, default="include"
+            How to handle missing bin when calculating feature importances:
+            
+            - "include" - include the missing bin.
+            - "ignore" - ignore the missing bin.
+            - "stratify" - calculate separate importances for missing and non-missing bins.
         """
         
         return super().plot_feature_importances(n_features, missing_bin)
@@ -2634,37 +2647,12 @@ class DNAMiteRegressor(BaseDNAMiteModel):
             entropy_param=entropy_param
         )
     
-    def score(self, X, y, y_train=None, model=None):
-        """
-        Compute the RMSE score for the model on the provided data.
-        
-        Parameters
-        ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
-            The input features for the model.
-            
-        y : pandas.Series or numpy.ndarray, shape (n_samples,)
-            The labels, should be floats in (-inf, inf).
-        """
-        from sklearn.metrics import root_mean_squared_error
+    def _score(self, X, y, y_train=None, model=None):
+        from sklearn.metrics import mean_squared_error
         preds = self._predict(X, models=[model])
                 
-        return {"RMSE": root_mean_squared_error(y, preds)}
+        return {"RMSE": np.sqrt(mean_squared_error(y, preds))}
     
-    def _score_from_preds(self, y_preds, y, y_train=None):
-        """
-        Compute the RMSE score from predictions.
-        
-        Parameters
-        ----------
-        y_preds : numpy.ndarray, shape (n_samples,)
-            The predicted labels.
-            
-        y : pandas.Series or numpy.ndarray, shape (n_samples,)
-            The true labels.
-        """
-        from sklearn.metrics import root_mean_squared_error
-        return root_mean_squared_error(y, y_preds)
 
 class DNAMiteBinaryClassifier(BaseDNAMiteModel):
     """
@@ -2695,6 +2683,11 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         The batch size for training.
     device : str, optional (default="cpu")
         The device to run the model on ("cpu" or "cuda").
+    pairs_list : list of tuple[int, int], optional
+        List of pairs to use in the model.
+        Each entry should be a pair of indices corresponding to the features.
+        Should only be set if manual pair selection is desired.
+        Set num_pairs instead for automatic pair selection.
     kernel_size : int, optional (default=5)
         The size of the kernel in convolutional layers for single features.
     kernel_weight : float, optional (default=3)
@@ -2930,14 +2923,16 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         
         Parameters
         ----------
-        ignore_missing_bin : bool, default=False
-            Whether to ignore the missing bin when computing feature importances.
-            If the missing bin is ignored, then the importance is only calculated over samples where 
-            the feature is not missing. 
+        missing_bin : str, default="include"
+            How to handle missing bin when calculating feature importances:
+            
+            - "include" - include the missing bin.
+            - "ignore" - ignore the missing bin.
+            - "stratify" - calculate separate importances for missing and non-missing bins.
             
         Returns
         -------
-        importances : pandas.DataFrame
+        pandas.DataFrame
             A DataFrame containing the feature importance scores for each feature.
         """
         
@@ -2957,7 +2952,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         
         Returns
         -------
-        pair_data_dnamite : pandas.DataFrame
+        pandas.DataFrame
             A DataFrame containing the shape function data for the interaction effect.
         """
         
@@ -2974,7 +2969,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             
         Returns
         -------
-        df : pandas.DataFrame
+        pandas.DataFrame
             A DataFrame containing the bin scores for the feature.
         """
         
@@ -2988,6 +2983,13 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         ----------
         n_features : int, default=10
             Number of features to plot.
+            
+        missing_bin : str, default="include"
+            How to handle missing bin when calculating feature importances:
+            
+            - "include" - include the missing bin.
+            - "ignore" - ignore the missing bin.
+            - "stratify" - calculate separate importances for missing and non-missing bins.
         """
         
         return super().plot_feature_importances(n_features, missing_bin=missing_bin)
@@ -3102,39 +3104,12 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             entropy_param=entropy_param
         )
     
-    def score(self, X, y, y_train=None, model=None):
-        """
-        Compute the AUC for the model on the provided data.
-        
-        Parameters
-        ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
-            The input features for the model.
-            
-        y : pandas.Series or numpy.ndarray, shape (n_samples,)
-            The labels, should be label encoded as 0 and 1.
-        """
+    def _score(self, X, y, y_train=None, model=None):
         from sklearn.metrics import roc_auc_score
         preds = self._predict(X, models=[model])
         preds = 1 / (1 + np.exp(-preds))
         
         return {"AUC": roc_auc_score(y, preds)}
-    
-    def _score_from_preds(self, y_preds, y, y_train=None):
-        """
-        Compute the AUC score from predictions.
-        
-        Parameters
-        ----------
-        y_preds : numpy.ndarray, shape (n_samples,)
-            The predicted labels.
-            
-        y : pandas.Series or numpy.ndarray, shape (n_samples,)
-            The true labels.
-        """
-        from sklearn.metrics import roc_auc_score
-        prob_preds = 1 / (1 + np.exp(-y_preds))
-        return roc_auc_score(y, prob_preds)
     
 
 class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
@@ -3168,6 +3143,11 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         The batch size for training.
     device : str, optional (default="cpu")
         The device to run the model on ("cpu" or "cuda").
+    pairs_list : list of tuple[int, int], optional
+        List of pairs to use in the model.
+        Each entry should be a pair of indices corresponding to the features.
+        Should only be set if manual pair selection is desired.
+        Set num_pairs instead for automatic pair selection.
     kernel_size : int, optional (default=5)
         The size of the kernel in convolutional layers for single features.
     kernel_weight : float, optional (default=3)
@@ -3485,7 +3465,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         
         Returns
         -------
-        pair_data_dnamite : pandas.DataFrame
+        pandas.DataFrame
             A DataFrame containing the shape function data for the interaction effect.
         """
         
@@ -3499,6 +3479,13 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         ----------
         n_features : int, default=10
             Number of features to plot.
+            
+        missing_bin : str, default="include"
+            How to handle missing bin when calculating feature importances:
+            
+            - "include" - include the missing bin.
+            - "ignore" - ignore the missing bin.
+            - "stratify" - calculate separate importances for missing and non-missing bins.
         """
         
         return super().plot_feature_importances(n_features, missing_bin=missing_bin)
@@ -3605,38 +3592,11 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             entropy_param=entropy_param
         )
     
-    def score(self, X, y, y_train=None, model=None):
-        """
-        Compute the accuracy for the model on the provided data.
-        
-        Parameters
-        ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
-            The input features for the model.
-            
-        y : pandas.Series or numpy.ndarray, shape (n_samples,)
-            The labels, should be label encoded as 0, 1, ..., n_classes-1.
-        """
+    def _score(self, X, y, y_train=None, model=None):
         from sklearn.metrics import accuracy_score
         preds = self._predict(X, models=[model])
         hard_preds = np.argmax(preds, axis=1)
         return {"ACCURACY": accuracy_score(y, hard_preds)}
-    
-    def _score_from_preds(self, y_preds, y, y_train=None):
-        """
-        Compute the accuracy score from predictions.
-        
-        Parameters
-        ----------
-        y_preds : numpy.ndarray, shape (n_samples, n_classes)
-            The predicted labels.
-            
-        y : pandas.Series or numpy.ndarray, shape (n_samples,)
-
-        """ 
-        from sklearn.metrics import accuracy_score
-        hard_preds = np.argmax(y_preds, axis=1)
-        return accuracy_score(y, hard_preds)
 
 
 class DNAMiteSurvival(BaseDNAMiteModel):
@@ -3672,8 +3632,11 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         The batch size for training.
     device : str, optional (default="cpu")
         The device to run the model on ("cpu" or "cuda").
-    pairs_list : list, optional
-        A list of pairs for pairwise training, if applicable.
+    pairs_list : list of tuple[int, int], optional
+        List of pairs to use in the model.
+        Each entry should be a pair of indices corresponding to the features.
+        Should only be set if manual pair selection is desired.
+        Set num_pairs instead for automatic pair selection.
     kernel_size : int, optional (default=5)
         The size of the kernel in convolutional layers.
     kernel_weight : float, optional (default=3)
@@ -4159,14 +4122,14 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
         return
     
-    def _fit_one_split(self, X_train, y_train, X_val, y_val, random_state=None, partialed_indices=None):
+    def _fit_one_split(self, X_train, y_train, X_val, y_val, random_state=None, partialed_feats=None):
         return super()._fit_one_split(
             X_train, 
             y_train, 
             X_val, 
             y_val, 
             random_state, 
-            partialed_indices, 
+            partialed_feats, 
             train_loader_args={"pcw_obs_times": self.pcw_obs_times[random_state-self.random_state]["train"]},
             val_loader_args={"pcw_obs_times": self.pcw_obs_times[random_state-self.random_state]["val"]}
         )
@@ -4180,12 +4143,16 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         eval_time : float or None, default=None
             The evaluation time for which to compute the feature importance.
             
-        ignore_missing_bin : bool, default=False
-            Whether to ignore the missing bin when computing the importance.
+        missing_bin : str, default="include"
+            How to handle missing bin when calculating feature importances:
+            
+            - "include" - include the missing bin.
+            - "ignore" - ignore the missing bin.
+            - "stratify" - calculate separate importances for missing and non-missing bins.
             
         Returns
         -------
-        importances : pandas.DataFrame
+        pandas.DataFrame
             A DataFrame containing the feature importance scores for each feature.
         """
         
@@ -4252,17 +4219,25 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         n_features : int, default=10
             Number of features to plot.
             
-        eval_time : float, list or None, default=None
+        eval_times : float, list or None, default=None
             The evaluation time(s) for which to compute the feature importance.
             None means to compute the importance over all evaluation times.
             
-        ignore_missing_bin : bool, default=False
-            Whether to ignore the missing bin when computing the importance.
+        missing_bin : str, default="include"
+            How to handle missing bin when calculating feature importances:
+            
+            - "include" - include the missing bin.
+            - "ignore" - ignore the missing bin.
+            - "stratify" - calculate separate importances for missing and non-missing bins.
         """
         
         num_eval_times = len(eval_times) if isinstance(eval_times, list) else 1
         fig, axes = plt.subplots(1, num_eval_times, figsize=((8 if missing_bin == "stratify" else 6)*num_eval_times, 4))
         # plt.figure(figsize=(8 if missing_bin == "stratify" else 6, 4))
+        
+        if num_eval_times == 1:
+            axes = [axes]
+            eval_times = [eval_times]
         
         if not isinstance(eval_times, list):
             eval_times = [eval_times]
@@ -4295,35 +4270,6 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                         xerr=1.96 * feat_imps["missing_sem"],
                         color=sns.color_palette()[1]
                     )
-                
-                
-                # feat_means = feat_imps.groupby(["feature", "bin_type"])["importance"].mean().reset_index()
-                # feat_means = feat_means.pivot(index="feature", columns="bin_type", values="importance").reset_index()
-                # feat_means = feat_means.sort_values(by="observed", ascending=False).head(n_features)
-                # feat_means = feat_means.melt(id_vars="feature", value_vars=["observed", "missing"], 
-                #                             var_name="bin_type", value_name='importance')
-                
-                # if self.n_val_splits == 1:
-                #     sns.barplot(
-                #         x="importance",
-                #         y="feature",
-                #         hue="bin_type",
-                #         data=feat_means,
-                #         orient="h",
-                #         ax=axes[i]
-                #     )
-                # else:
-                #     feat_sems = feat_imps.groupby(["feature", "bin_type"])["importance"].agg(["sem"]).reset_index()
-                #     feat_imps = feat_means.merge(feat_sems, on=["feature", "bin_type"])
-                #     sns.barplot(
-                #         x="importance",
-                #         y="feature",
-                #         hue="bin_type",
-                #         data=feat_imps,
-                #         xerr=1.96 * feat_imps["sem"].values.reshape(2, -1),
-                #         orient="h",
-                #         ax=axes[i]
-                #     )
                     
                 axes[i].set_ylabel("")
 
@@ -4364,7 +4310,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
         Returns
         -------
-        df : pandas.DataFrame
+        pandas.DataFrame
             A DataFrame containing the bin scores for the feature.
         """
         is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
@@ -4425,7 +4371,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         if isinstance(feature_names, str):
             feature_names = [feature_names]
             
-        if isinstance(eval_times, float):
+        if not isinstance(eval_times, list):
             eval_times = [eval_times]
             
         is_cat_cols = [self.feature_dtypes[self.feature_names_in_.get_loc(f)] != 'continuous' for f in feature_names]
@@ -4465,17 +4411,21 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
         else:
             fig, axes = plt.subplots(len(eval_times), num_axes, figsize=(4*num_axes, 4*len(eval_times)))
-            if len(axes) == 1:
-                axes = [axes]
+            # if len(axes) == 1:
+            #     axes = [axes]
+            if not isinstance(axes, np.ndarray):
+                axes = np.array(axes)
             if len(feature_names) == 1:
                 axes = axes.reshape(-1, 1)
+            if len(eval_times) == 1:
+                axes = axes.reshape(1, -1)
                 
         
         ax_idx = 0
         
         for eval_idx, eval_time in enumerate(eval_times):
             ax_idx = 0
-            yaxis_label = f"Contribution to logit($P(T \leq {eval_time} | X)$)"
+            yaxis_label = f"Contribution to logit($P(T \\leq {eval_time} | X)$)"
             
             for feature_name in feature_names:
                 
@@ -4565,7 +4515,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
         Returns
         -------
-        pair_data_dnamite : pandas.DataFrame
+        pandas.DataFrame
             A DataFrame containing the shape function data for the interaction effect.
         """
         
@@ -4646,13 +4596,15 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         )
 
         # Round the values in the columns and index
-        # Round the index and columns to 3 decimal places and reassign
-        pair_data_dnamite.index = pair_data_dnamite.index.to_series().round(3)
-        pair_data_dnamite.columns = pair_data_dnamite.columns.to_series().round(3)
+        # Round the index and columns to 3 decimal places and reassign 
+        if pair_data_dnamite.index.dtype == 'float64':
+            pair_data_dnamite.index = pair_data_dnamite.index.round(3)
+        if pair_data_dnamite.columns.dtype == 'float64':
+            pair_data_dnamite.columns = pair_data_dnamite.columns.round(3)
         
         return pair_data_dnamite
     
-    def plot_pair_shape_function(self, feat1_name, feat2_name, eval_time):
+    def plot_pair_shape_function(self, feat1_name, feat2_name, eval_times):
         """
         Plot a heatmap for an interaction shape function.
         
@@ -4664,24 +4616,28 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         feat2_name : str
             The name of the second feature in the pair/interaction.
             
-        eval_time : float
-            The evaluation time to plot the interaction shape function at.
+        eval_times : float or list of float
+            The evaluation time(s) to plot the interaction shape function at.
         """
         
-        plt.figure(figsize=(4, 4))
+        # plt.figure(figsize=(4, 4))
+        if not isinstance(eval_times, list):
+            eval_times = [eval_times]
         
-        pair_data_dnamite = self.get_pair_shape_function(feat1_name, feat2_name, eval_time)
-
-        sns.heatmap(pair_data_dnamite)
+        fig, axes = plt.subplots(1, len(eval_times), figsize=(4*len(eval_times), 4))
+        if len(eval_times) == 1:
+            axes = [axes]
+        
+        for ax, eval_time in zip(axes, eval_times):
+            pair_data_dnamite = self.get_pair_shape_function(feat1_name, feat2_name, eval_time)
+            sns.heatmap(pair_data_dnamite, ax=ax)
+            ax.set_title(f"Interaction at t={eval_time}")
         
         plt.tight_layout()
         
-    def _predict(self, X_test_discrete, models):
+    def _predict(self, X_test_discrete, models, pcw_obs_times_test):
         
         if hasattr(self, 'selected_feats'):
-            self.logger.debug("Found selected features. Using only those features.")
-            X_test_discrete = X_test_discrete[self.selected_feats]
-            
             if self.fit_pairs:
                 pairs_list = [
                     [X_test_discrete.columns.get_loc(feat1), X_test_discrete.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs
@@ -4693,7 +4649,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         y_test = np.zeros(X_test_discrete.shape[0], dtype=[("event", "?"), ("time", "f8")])
         
         if not self.fit_pairs:
-            test_loader = self.get_data_loader(X_test_discrete, y_test, shuffle=False, pcw_obs_times=self.pcw_obs_times_test)
+            test_loader = self.get_data_loader(X_test_discrete, y_test, shuffle=False, pcw_obs_times=pcw_obs_times_test)
             test_preds = np.zeros((len(models), X_test_discrete.shape[0], self.n_output))
             for i, model in enumerate(models):
                 _, model_preds = self.test_epoch_mains(model, test_loader)
@@ -4701,7 +4657,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                 
         else:
             X_test_interactions = X_test_discrete.values[:, pairs_list]
-            test_loader = self.get_data_loader(X_test_discrete, y_test, pairs=X_test_interactions, shuffle=False, pcw_obs_times=self.pcw_obs_times_test)
+            test_loader = self.get_data_loader(X_test_discrete, y_test, pairs=X_test_interactions, shuffle=False, pcw_obs_times=pcw_obs_times_test)
             test_preds = np.zeros((len(models), X_test_discrete.shape[0], self.n_output))
             for i, model in enumerate(models):
                 _, model_preds = self.test_epoch_pairs(model, test_loader)
@@ -4719,9 +4675,15 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             The input features for prediction.
         
         """
-        self._set_pcw_obs_times(y_test=np.zeros(X_test.shape[0], dtype=[("event", "?"), ("time", "f8")]), X_test=X_test)
+        # self._set_pcw_obs_times(y_test=np.zeros(X_test.shape[0], dtype=[("event", "?"), ("time", "f8")]), X_test=X_test)
+        pcw_obs_times_test = self._predict_censoring_distribution(np.zeros(X_test.shape[0]), X_test) + 1e-5
         X_test_discrete = self._discretize_data(X_test)
-        return self._predict(X_test_discrete, self.models)
+        
+        if hasattr(self, 'selected_feats'):
+            self.logger.debug("Found selected features. Using only those features.")
+            X_test_discrete = X_test_discrete[self.selected_feats]
+        
+        return self._predict(X_test_discrete, self.models, pcw_obs_times_test)
     
     def predict_survival(self, X_test, test_times=None):
         """
@@ -4738,7 +4700,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
         Returns
         -------
-        surv_probs : np.ndarray of shape (n_samples, n_eval_times)
+        np.ndarray of shape (n_samples, n_eval_times)
             The predicted survival probabilities for each sample at each evaluation time.
         
         """
@@ -4754,20 +4716,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
         return surv_preds
     
-    def score(self, X, y, y_train, model=None):
-        """
-        Compute the time-dependent AUC score for the model.
-        
-        Parameters
-        ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
-            The input features for the model.
-            
-        y : structured np.array of shape (n_samples,) with dtype [("event", bool), ("time", float)]
-            Survival labels.
-            Event: True if event occurred, False if censored.
-            Time: Time to event or time of censoring.
-        """
+    def _score(self, X, y, y_train, model=None):
         
         from sksurv.metrics import cumulative_dynamic_auc
         
@@ -4777,44 +4726,20 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             1000
         )
         
-        preds = self._predict(X, models=[model])
+        pcw_obs_times_test = self._predict_censoring_distribution(np.zeros(X.shape[0]), X) + 1e-5
+        
+        preds = self._predict(X, models=[model], pcw_obs_times_test=pcw_obs_times_test)
         cdf_preds = 1 / (1 + np.exp(-1 * preds))
         
+        cdf_preds = cdf_preds[
+            :,
+            np.clip(
+                np.searchsorted(self.eval_times.cpu().numpy(), test_times),
+                0, cdf_preds.shape[1]-1
+            )
+        ]
+        
         return {"Mean_AUC": cumulative_dynamic_auc(y_train, y, cdf_preds, test_times)[1]}
-    
-    def _score_from_preds(self, y_preds, y, y_train=None):
-        """
-        Compute the time-dependent AUC score for the model.
-        
-        Parameters
-        ----------
-        
-        y_preds : np.ndarray of shape (n_samples, n_eval_times)
-            Survival predictions.
-            
-        y : structured np.array of shape (n_samples,) with dtype [("event", bool), ("time", float)]
-        
-        y_train : structured np.array of shape (n_samples,) with dtype [("event", bool), ("time", float)]
-            Training survival labels.
-        """
-        
-        from sksurv.metrics import cumulative_dynamic_auc
-        
-        test_times = np.linspace(
-            max(y_train["time"].min(), y[y["event"] > 0]["time"].min()) + 1e-4,
-            min(y_train["time"].max(), y[y["event"] > 0]["time"].max()) - 1e-4,
-            1000
-        )
-        
-        cdf_preds = 1 / (1 + np.exp(-1 * y_preds))
-        
-        if test_times is not None:
-            cdf_preds = cdf_preds[
-                :,
-                np.searchsorted(self.eval_times.cpu().numpy(), test_times, side='right') - 1
-            ]
-        
-        return cumulative_dynamic_auc(y_train, y, cdf_preds, test_times)[1]
     
     def get_calibration_data(self, X, y, eval_time, n_bins=10, binning_method="quantile"):
         """
@@ -4917,7 +4842,12 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             Method for binning predictions. Options are "quantile" or "uniform".
         """
         
+        if not isinstance(eval_times, list):
+            eval_times = [eval_times]
+        
         fig, axes = plt.subplots(1, len(eval_times), figsize=(4*len(eval_times), 4))
+        if len(eval_times) == 1:
+            axes = [axes]
         
         for eval_time, ax in zip(eval_times, axes):
         

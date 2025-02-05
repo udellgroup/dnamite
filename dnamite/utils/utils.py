@@ -21,7 +21,7 @@ def discretize(x, max_bins, bins=None, min_samples_per_bin=None):
         x = x.values
         
     if min_samples_per_bin is None:
-        min_samples_per_bin = min(0.01*x.shape[0], 50)
+        min_samples_per_bin = min(x.shape[0] // 100, 50)
         
     # Convert to float if not float
     if x.dtype != np.float64:
