@@ -1544,6 +1544,10 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         self.reg_param = init_reg_param
         self.fit_pairs = False
+        self.gamma = None # will be set in _select_features
+        self.pair_gamma = None
+        self.pair_reg_param = 0
+        self.entropy_param = 0
         
         n_feat_selected = np.inf
         losses = []
