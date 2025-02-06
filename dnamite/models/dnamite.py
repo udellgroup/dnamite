@@ -1540,7 +1540,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
     
     def get_regularization_path(self, X, y, init_reg_param, partialed_feats=None):
         
-        original_reg_param = self.reg_param
         original_fit_pairs = self.fit_pairs
         
         self.reg_param = init_reg_param
@@ -1576,7 +1575,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             self.reg_param = self.reg_param * 2
             del self.selected_feats
             
-        self.reg_param = original_reg_param
         self.fit_pairs = original_fit_pairs
         
         val_score_name = list(val_score.keys())[0]
