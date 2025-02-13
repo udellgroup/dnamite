@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dnamite"
-version = "1.0.2"
+version = "1.0.3"
 description = "Implementation of DNAMite, an interpretable model for survival analysis and more."
 readme = "README.md"
 requires-python = ">=3.7"
