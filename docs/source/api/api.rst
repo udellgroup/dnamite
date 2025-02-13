@@ -5,5 +5,6 @@ User API
    :maxdepth: 1
 
    models
+   datasets
 
    
