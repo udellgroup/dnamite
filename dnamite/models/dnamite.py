@@ -13,7 +13,7 @@ import matplotlib.gridspec as gridspec
 import seaborn as sns
 from itertools import combinations
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OrdinalEncoder
+from sklearn.preprocessing import OrdinalEncoder, LabelEncoder, StandardScaler
 from sklearn.compose import make_column_transformer
 from sklearn.metrics import mean_squared_error, roc_auc_score
 from sksurv.nonparametric import CensoringDistributionEstimator, kaplan_meier_estimator
@@ -1080,11 +1080,16 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         else:
             self.feature_bins = []
             self.feature_sizes = []
-            self.has_missing_bin = []
+            self.has_missing_bin = [] # different than cat_feat_mask because cat feats can have missing values
+            self.has_missing_values = [] # different than has_missing_bin because continuous features always have missing bin (to make kernel work correctly)
             self.logger.debug("Discretizing features...")
             from time import time
             for i in range(self.n_features):
                 if self.feature_dtypes[i] == 'continuous':
+                    if pd.Series(X_discrete[:, i]).isna().sum() > 0:
+                        self.has_missing_values.append(True)
+                    else:
+                        self.has_missing_values.append(False)
                     X_discrete[:, i], bins = discretize(
                         np.ascontiguousarray(X_discrete[:, i]), 
                         max_bins=self.max_bins, 
@@ -1094,11 +1099,12 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                 elif self.feature_dtypes[i] == 'binary':
                     bins = [0, 1]
                     self.has_missing_bin.append(False)
+                    self.has_missing_values.append(False)
                 else:
                     # Ordinal encoder and force missing/unknown value to be 0
                     ordinal_encoder = OrdinalEncoder(
                         dtype=float, 
-                        min_frequency=min(0.01*X.shape[0], 50),
+                        min_frequency=min(X.shape[0] // 100, 50),
                         handle_unknown="use_encoded_value", 
                         unknown_value=-1, 
                         encoded_missing_value=-1
@@ -1115,9 +1121,11 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                         X_discrete[:, i] += 1.0
                         bins = [np.nan] + [c for c in ordinal_encoder.categories_[0] if c is not None and c == c and c not in infrequent_categories]
                         self.has_missing_bin.append(True)
+                        self.has_missing_values.append(True)
                     else:
                         bins = [c for c in ordinal_encoder.categories_[0] if c is not None and c == c and c not in infrequent_categories]
                         self.has_missing_bin.append(False)
+                        self.has_missing_values.append(False)
                         
                     if len(infrequent_categories) > 0:
                         bins.append("Other")
@@ -1195,10 +1203,14 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                 pairs_list = None
                 
             feature_sizes = [self.feature_sizes[self.feature_names_in_.get_loc(feat)] for feat in self.selected_feats]
+            cat_feat_mask = self.cat_feat_mask[self.feature_names_in_.get_indexer(self.selected_feats)]
+            monotone_constraints = None if self.monotone_constraints is None else [self.monotone_constraints[self.feature_names_in_.get_loc(feat)] for feat in self.selected_feats]
+
         else:
             pairs_list = self.pairs_list
-            # pairs_list = None
             feature_sizes = self.feature_sizes
+            cat_feat_mask = self.cat_feat_mask
+            monotone_constraints = self.monotone_constraints
             
         if partialed_feats is not None:
             partialed_indices = [X_train.columns.get_loc(feat) for feat in partialed_feats]
@@ -1224,8 +1236,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             kernel_weight=self.kernel_weight,
             pair_kernel_size=self.pair_kernel_size,
             pair_kernel_weight=self.pair_kernel_weight,
-            cat_feat_mask=self.cat_feat_mask,
-            monotone_constraints=self.monotone_constraints,
+            cat_feat_mask=cat_feat_mask,
+            monotone_constraints=monotone_constraints,
             verbosity=self.verbosity
         ).to(self.device)
         model.feature_names_in_ = X_train.columns
@@ -1343,7 +1355,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         Parameters
         ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X : pandas.DataFrame, shape (n_samples, n_features)
             The input features for the model.   
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The target variable. 
@@ -1363,6 +1375,14 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         entropy_param : float, default=0
             Entropy parameter to control the diversity or uncertainty.
         """
+        
+        if isinstance(X, np.ndarray):
+            raise ValueError("Input data must be a pandas DataFrame.")
+        
+        if hasattr(self, "feature_names_in_"):
+            if not all(X.columns == self.feature_names_in_):
+                raise ValueError("Input data columns do not match saved feature names.")
+        
         self.gamma = gamma
         self.pair_gamma = pair_gamma if pair_gamma is not None else gamma
         self.reg_param = reg_param
@@ -1693,7 +1713,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
 
         Parameters
         ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X : pandas.DataFrame, shape (n_samples, n_features)
             The input features for training.
 
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
@@ -1703,6 +1723,13 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             A list of features that should be fit completely before fitting all other features.
         """
         self.logger.debug("STARTING FIT...")
+        
+        if isinstance(X, np.ndarray):
+            raise ValueError("Input data must be a pandas DataFrame.")
+        
+        if hasattr(self, "feature_names_in_"):
+            if not all(X.columns == self.feature_names_in_):
+                raise ValueError("Input data columns do not match saved feature names.")
         
         if hasattr(self, 'selected_feats'):
             if hasattr(self, 'selected_pairs') and self.fit_pairs:
@@ -1775,10 +1802,17 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         Parameters
         ----------
-        X_test : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X_test : pandas.DataFrame, shape (n_samples, n_features)
             The input features for prediction.
         
         """
+        if isinstance(X_test, np.ndarray):
+            raise ValueError("Input data must be a pandas DataFrame.")
+        
+        if hasattr(self, "feature_names_in_"):
+            if not all(X_test.columns == self.feature_names_in_):
+                raise ValueError("Input data columns do not match saved feature names.")
+        
         X_test_discrete = self._discretize_data(X_test)
                 
         if hasattr(self, 'selected_feats'):
@@ -1820,6 +1854,9 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                     missing_bin_score = feat_bin_scores[0]
                     feat_bin_scores = feat_bin_scores[1:]
                     bin_counts = bin_counts[1:]
+                if missing_bin == "ignore" and not self.has_missing_values[i]:
+                    feat_bin_scores = feat_bin_scores[1:]
+                    bin_counts = bin_counts[1:]
                 
                 feat_importance = np.sum(np.abs(feat_bin_scores) * np.array(bin_counts)) / np.sum(bin_counts)
                 
@@ -1829,21 +1866,28 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                     else:
                         missing_importance = np.nan
                     importances.append([split, col, feat_importance, "observed", len(feat_bin_scores)])
-                    importances.append([split, col, missing_importance, "missing", 1])
+                    if self.has_missing_values[i]:
+                        importances.append([split, col, missing_importance, "missing", 1])
                 else:
                     importances.append([split, col, feat_importance, len(feat_bin_scores)])
             
             if model.fit_pairs:
-                pairs_list = model.pairs_list.cpu().numpy()
-                for i, pair in enumerate(pairs_list):
-                    # To do: incorporate ignore missing bin here
-                    pair_bin_scores = model.pair_bin_scores[i].squeeze()
-                    pair_importance = np.sum(np.abs(pair_bin_scores) * np.array(model.pair_bin_counts[i])) / np.sum(model.pair_bin_counts[i])
+                
+                if missing_bin == "include":
+                    pairs_list = model.pairs_list.cpu().numpy()
+                    for i, pair in enumerate(pairs_list):
+                        # To do: incorporate ignore missing bin here
+                        pair_bin_scores = model.pair_bin_scores[i].squeeze()
+                        pair_importance = np.sum(np.abs(pair_bin_scores) * np.array(model.pair_bin_counts[i])) / np.sum(model.pair_bin_counts[i])
+                        
+                        if missing_bin == "stratify":
+                            importances.append([split, f"{model.feature_names_in_[pair[0]]} || {model.feature_names_in_[pair[1]]}", pair_importance, "observed", len(pair_bin_scores)])
+                        else:
+                            importances.append([split, f"{model.feature_names_in_[pair[0]]} || {model.feature_names_in_[pair[1]]}", pair_importance, len(pair_bin_scores)])
+        
+                else:
+                    self.logger.warning(f"missing_bin was set to {missing_bin}, which does not support interactions. Thus, interactions will not be scored.")
                     
-                    if missing_bin == "stratify":
-                        importances.append([split, f"{model.feature_names_in_[pair[0]]} || {model.feature_names_in_[pair[1]]}", pair_importance, "observed", len(pair_bin_scores)])
-                    else:
-                        importances.append([split, f"{model.feature_names_in_[pair[0]]} || {model.feature_names_in_[pair[1]]}", pair_importance, len(pair_bin_scores)])
         
         if missing_bin == "stratify":
             self.importances = pd.DataFrame(importances, columns=["split", "feature", "importance", "bin_type", "n_bins"])
@@ -1873,28 +1917,48 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         feat_imps = self.get_feature_importances(missing_bin=missing_bin)
 
         if missing_bin == "stratify":
-            feat_means = feat_imps.groupby(["feature", "bin_type"])["importance"].mean().reset_index()
-            feat_means = feat_means.pivot(index="feature", columns="bin_type", values="importance").reset_index()
-            feat_means = feat_means.sort_values(by="observed", ascending=True).tail(n_features)
             
             if self.n_val_splits == 1:
-                plt.barh(feat_means["feature"], feat_means["observed"], color=sns.color_palette()[0])
-                plt.barh(feat_means["feature"], -1*feat_means["missing"], color=sns.color_palette()[1])
+                feat_imps = feat_imps.groupby(["feature", "bin_type"])["importance"] \
+                        .agg(["mean"]) \
+                        .reset_index() \
+                        .pivot(index="feature", columns="bin_type") \
+                        .sort_values(("mean", "observed"), ascending=True) \
+                        .tail(n_features)
+                feat_imps = feat_imps.fillna(0)
+                plt.barh(
+                    y=feat_imps.index,
+                    width=feat_imps[("mean", "observed")],
+                    color=sns.color_palette()[0]
+                )
+                if ("mean", "missing") in feat_imps.columns:
+                    plt.barh(
+                        y=feat_imps.index,
+                        width=-1 * feat_imps[("mean", "missing")],
+                        color=sns.color_palette()[1]
+                    )   
             else:
-                feat_sems = feat_imps.groupby(["feature", "bin_type"])["importance"].agg(["sem"]).reset_index()
-                feat_sems = feat_sems.pivot(index="feature", columns="bin_type", values="sem").reset_index()
-                feat_imps = feat_means.merge(feat_sems, on="feature", suffixes=("", "_sem"))
+                feat_imps = feat_imps.groupby(["feature", "bin_type"])["importance"] \
+                        .agg(["mean", "sem"]) \
+                        .reset_index() \
+                        .pivot(index="feature", columns="bin_type") \
+                        .sort_values(("mean", "observed"), ascending=True) \
+                        .tail(n_features)
+                feat_imps = feat_imps.fillna(0)
                 plt.barh(
-                    y=feat_imps["feature"],
-                    width=feat_imps["observed"],
-                    xerr=1.96 * feat_imps["observed_sem"],
+                    y=feat_imps.index,
+                    width=feat_imps[("mean", "observed")],
+                    xerr=1.96 * feat_imps[("sem", "observed")],
+                    color=sns.color_palette()[0]
                 )
-                plt.barh(
-                    y=feat_imps["feature"],
-                    width=-1*feat_imps["missing"],
-                    xerr=1.96 * feat_imps["missing_sem"],
-                    color=sns.color_palette()[1]
-                )
+                if ("mean", "missing") in feat_imps.columns:
+                    plt.barh(
+                        y=feat_imps.index,
+                        width=-1 * feat_imps[("mean", "missing")],
+                        xerr=1.96 * feat_imps[("sem", "missing")],
+                        color=sns.color_palette()[1]
+                    )       
+                
                 
             plt.ylabel("")
 
@@ -2205,6 +2269,9 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         """
         
+        if not self.fit_pairs:
+            raise ValueError("Model was not fit with pairs.")
+        
         plt.figure(figsize=(4, 4))
         
         pair_data_dnamite = self.get_pair_shape_function(feat1_name, feat2_name)
@@ -2463,7 +2530,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
 
         Parameters
         ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X : pandas.DataFrame, shape (n_samples, n_features)
             The input features for training. 
             Missing values should be encoded as np.nan.
             Categorical features will automatically be detected as all columns with dtype "object" or "category".
@@ -2474,6 +2541,17 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
         """
+        
+        if type(y) == pd.Series:
+            y = y.values
+        
+        # Standardize the labels
+        if not hasattr(self, "label_scaler"):
+            self.label_scaler = StandardScaler()
+            y = self.label_scaler.fit_transform(y.reshape(-1, 1)).squeeze()
+        else:
+            y = self.label_scaler.transform(y.reshape(-1, 1)).squeeze()
+        
         return super().fit(X, y, partialed_feats=partialed_feats)
     
     def get_feature_importances(self, missing_bin="include"):
@@ -2591,12 +2669,12 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         
         Parameters
         ----------
-        X_test : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X_test : pandas.DataFrame, shape (n_samples, n_features)
             The input features for prediction.
         
         """
-        
-        return super().predict(X_test)
+        preds = super().predict(X_test)
+        return self.label_scaler.inverse_transform(preds.reshape(-1, 1)).squeeze()
     
     def select_features(
         self, 
@@ -2616,7 +2694,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         
         Parameters
         ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X : pandas.DataFrame, shape (n_samples, n_features)
             The input features for the model.   
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The target variable. 
@@ -2637,6 +2715,16 @@ class DNAMiteRegressor(BaseDNAMiteModel):
             Entropy parameter to control the diversity or uncertainty.
         """
         
+        if type(y) == pd.Series:
+            y = y.values
+        
+        # Standardize the labels
+        if not hasattr(self, "label_scaler"):
+            self.label_scaler = StandardScaler()
+            y = self.label_scaler.fit_transform(y.reshape(-1, 1)).squeeze()
+        else:
+            y = self.label_scaler.transform(y.reshape(-1, 1)).squeeze()
+        
         return super().select_features(
             X, 
             y, 
@@ -2652,6 +2740,9 @@ class DNAMiteRegressor(BaseDNAMiteModel):
     def _score(self, X, y, y_train=None, model=None):
         from sklearn.metrics import mean_squared_error
         preds = self._predict(X, models=[model])
+        
+        preds = self.label_scaler.inverse_transform(preds.reshape(-1, 1)).squeeze()
+        y = self.label_scaler.inverse_transform(y.reshape(-1, 1)).squeeze()
                 
         return {"RMSE": np.sqrt(mean_squared_error(y, preds))}
     
@@ -2906,17 +2997,27 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
 
         Parameters
         ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X : pandas.DataFrame, shape (n_samples, n_features)
             The input features for training. 
             Missing values should be encoded as np.nan.
             Categorical features will automatically be detected as all columns with dtype "object" or "category".
 
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
-            The labels, should be label encoded as 0 and 1.
+            The labels. Should have two unique values.
 
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
         """
+        
+        if len(np.unique(y)) != 2:
+            raise ValueError("y should have exactly two unique values")
+        
+        if not hasattr(self, "label_encoder"):
+            self.label_encoder = LabelEncoder()
+            y = self.label_encoder.fit_transform(y)
+        else:
+            y = self.label_encoder.transform(y)
+        
         return super().fit(X, y, partialed_feats=partialed_feats)
     
     def get_feature_importances(self, missing_bin="include"):
@@ -3034,7 +3135,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         
         Parameters
         ----------
-        X_test : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X_test : pandas.DataFrame, shape (n_samples, n_features)
             The input features for prediction.
         
         """
@@ -3047,7 +3148,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         
         Parameters
         ----------
-        X_test : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X_test : pandas.DataFrame, shape (n_samples, n_features)
             The input features for prediction.
         
         """
@@ -3073,7 +3174,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         
         Parameters
         ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X : pandas.DataFrame, shape (n_samples, n_features)
             The input features for the model.   
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The target variable. 
@@ -3094,6 +3195,15 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             Entropy parameter to control the diversity or uncertainty.
         """
         
+        if len(np.unique(y)) != 2:
+            raise ValueError("y should have exactly two unique values")
+        
+        if not hasattr(self, "label_encoder"):
+            self.label_encoder = LabelEncoder()
+            y = self.label_encoder.fit_transform(y)
+        else:
+            y = self.label_encoder.transform(y)
+        
         return super().select_features(
             X, 
             y, 
@@ -3107,6 +3217,9 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         )
     
     def _score(self, X, y, y_train=None, model=None):
+        
+        y = self.label_encoder.transform(y)
+        
         from sklearn.metrics import roc_auc_score
         preds = self._predict(X, models=[model])
         preds = 1 / (1 + np.exp(-preds))
@@ -3440,7 +3553,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
 
         Parameters
         ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X : pandas.DataFrame, shape (n_samples, n_features)
             The input features for training. 
             Missing values should be encoded as np.nan.
             Categorical features will automatically be detected as all columns with dtype "object" or "category".
@@ -3536,7 +3649,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         
         Parameters
         ----------
-        X_test : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X_test : pandas.DataFrame, shape (n_samples, n_features)
             The input features for prediction.
         
         """
@@ -3561,7 +3674,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         
         Parameters
         ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X : pandas.DataFrame, shape (n_samples, n_features)
             The input features for the model.   
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The target variable.
@@ -4001,7 +4114,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
         Parameters
         ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X : pandas.DataFrame, shape (n_samples, n_features)
             The input features for the model.   
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The target variable.
@@ -4077,7 +4190,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
 
         Parameters
         ----------
-        X : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X : pandas.DataFrame, shape (n_samples, n_features)
             The input features for training.
 
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
@@ -4086,6 +4199,13 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
         """
+        
+        if isinstance(X, np.ndarray):
+            raise ValueError("Input data must be a pandas DataFrame.")
+        
+        if hasattr(self, "feature_names_in_"):
+            if not all(X.columns == self.feature_names_in_):
+                raise ValueError("Input data columns do not match saved feature names.")
         
         # Check the dtype of the labels
         assert y.dtype.names is not None, "y must be a structured array with 'time' and 'event' fields."
@@ -4622,6 +4742,9 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             The evaluation time(s) to plot the interaction shape function at.
         """
         
+        if not self.fit_pairs:
+            raise ValueError("Model was not fit with pairs.")
+        
         # plt.figure(figsize=(4, 4))
         if not isinstance(eval_times, list):
             eval_times = [eval_times]
@@ -4673,11 +4796,18 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
         Parameters
         ----------
-        X_test : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X_test : pandas.DataFrame, shape (n_samples, n_features)
             The input features for prediction.
         
         """
-        # self._set_pcw_obs_times(y_test=np.zeros(X_test.shape[0], dtype=[("event", "?"), ("time", "f8")]), X_test=X_test)
+        
+        if isinstance(X_test, np.ndarray):
+            raise ValueError("Input data must be a pandas DataFrame.")
+        
+        if hasattr(self, "feature_names_in_"):
+            if not all(X_test.columns == self.feature_names_in_):
+                raise ValueError("Input data columns do not match saved feature names.")
+        
         pcw_obs_times_test = self._predict_censoring_distribution(np.zeros(X_test.shape[0]), X_test) + 1e-5
         X_test_discrete = self._discretize_data(X_test)
         
@@ -4693,7 +4823,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
         Parameters
         ----------
-        X_test : pandas.DataFrame or numpy.ndarray, shape (n_samples, n_features)
+        X_test : pandas.DataFrame, shape (n_samples, n_features)
             The input features for prediction.
             
         test_times : array-like, optional
