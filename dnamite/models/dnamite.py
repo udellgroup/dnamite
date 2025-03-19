@@ -1104,7 +1104,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                     # Ordinal encoder and force missing/unknown value to be 0
                     ordinal_encoder = OrdinalEncoder(
                         dtype=float, 
-                        min_frequency=min(X.shape[0] // 100, 50),
+                        min_frequency=min(X.shape[0] // 100, 50) if X.shape[0] > 100 else 1,
                         handle_unknown="use_encoded_value", 
                         unknown_value=-1, 
                         encoded_missing_value=-1
@@ -1884,9 +1884,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                             importances.append([split, f"{model.feature_names_in_[pair[0]]} || {model.feature_names_in_[pair[1]]}", pair_importance, "observed", len(pair_bin_scores)])
                         else:
                             importances.append([split, f"{model.feature_names_in_[pair[0]]} || {model.feature_names_in_[pair[1]]}", pair_importance, len(pair_bin_scores)])
-        
-                else:
-                    self.logger.warning(f"missing_bin was set to {missing_bin}, which does not support interactions. Thus, interactions will not be scored.")
+                    
                     
         
         if missing_bin == "stratify":
@@ -1911,6 +1909,9 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             - "ignore" - ignore the missing bin.
             - "stratify" - calculate separate importances for missing and non-missing bins.
         """
+        
+        if missing_bin != "include" and self.fit_pairs:
+            self.logger.warning(f"missing_bin was set to {missing_bin}, which does not support interactions. Thus, interactions will not be scored.")
         
         plt.figure(figsize=(8 if missing_bin == "stratify" else 6, 4))
         
@@ -2049,41 +2050,43 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             Only applicable for continuous features.
         """
         
-        def set_font_sizes(axes):
-            LABEL_FONT_SIZE = 14 * (1.5 if plot_missing_bin else 1)
-            TICK_FONT_SIZE = 12 * (1.5 if plot_missing_bin else 1)
-            for ax in axes:
-                ax.xaxis.label.set_fontsize(LABEL_FONT_SIZE)
-                ax.yaxis.label.set_fontsize(LABEL_FONT_SIZE)
-                ax.tick_params(axis='both', which='major', labelsize=TICK_FONT_SIZE)
+        # def set_font_sizes(axes):
+        #     LABEL_FONT_SIZE = 14 * (1.5 if plot_missing_bin else 1)
+        #     TICK_FONT_SIZE = 12 * (1.5 if plot_missing_bin else 1)
+        #     for ax in axes:
+        #         ax.xaxis.label.set_fontsize(LABEL_FONT_SIZE)
+        #         ax.yaxis.label.set_fontsize(LABEL_FONT_SIZE)
+        #         ax.tick_params(axis='both', which='major', labelsize=TICK_FONT_SIZE)
         
         if isinstance(feature_names, str):
             feature_names = [feature_names]
             
         is_cat_cols = [self.feature_dtypes[self.feature_names_in_.get_loc(f)] != 'continuous' for f in feature_names]
 
-        num_axes = sum([2 if not c and plot_missing_bin else 1 for _, c in zip(feature_names, is_cat_cols)])
+        num_main_plots = len(feature_names)
+        num_missing_bin_plots = sum([1 if not c and plot_missing_bin else 0 for c in is_cat_cols])
+        num_axes = num_main_plots + num_missing_bin_plots
 
         if axes is None:
             if plot_missing_bin:
             
-                fig = plt.figure(figsize=(4*num_axes, 4))
-
-                gs = gridspec.GridSpec(1, 2*len(feature_names) + len(feature_names)-1, width_ratios=[10, 1, 4] * (len(feature_names)-1) + [10, 1])  # Add an extra column for the space
-                def generate_indices(n_times):
-                    indices = []
-                    for i in range(n_times):
-                        indices.extend([i*3, i*3+1])
-                    return indices
-
-                axes = [fig.add_subplot(gs[i]) for i in generate_indices(len(feature_names))]
+                fig = plt.figure(figsize=(4*num_main_plots + num_missing_bin_plots, 4))
+                
+                width_ratios = []
+                for i in range(num_main_plots):
+                    if not is_cat_cols[i]:
+                        width_ratios.extend([10, 1])
+                    else:
+                        width_ratios.append(10)
+                gs = gridspec.GridSpec(1, num_axes, width_ratios=width_ratios)
+                axes = [fig.add_subplot(gs[i]) for i in range(num_axes)]
                 
             else:
                 fig, axes = plt.subplots(1, num_axes, figsize=(4*num_axes, 4))
                 if num_axes == 1:
                     axes = [axes]
                     
-            set_font_sizes(axes)
+            # set_font_sizes(axes)
 
         ax_idx = 0
 
@@ -2150,8 +2153,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                     axes[ax_idx].set_ylabel("")
                 ax_idx += 1
         
-        if not plot_missing_bin:
-            plt.tight_layout()
+        # if not plot_missing_bin:
+        plt.tight_layout()
         
     def _make_grid(self, x, y):
         grid = np.meshgrid(x, y, indexing="ij")
@@ -2746,6 +2749,29 @@ class DNAMiteRegressor(BaseDNAMiteModel):
                 
         return {"RMSE": np.sqrt(mean_squared_error(y, preds))}
     
+    def get_regularization_path(self, X, y, init_reg_param, partialed_feats=None):
+        """
+        Get the regularization path for the model.
+        
+        Parameters
+        ----------
+        X : pandas.DataFrame, shape (n_samples, n_features)
+            The input features for the model.
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The target variable.
+        init_reg_param : float
+            Initial regularization parameter.
+        partialed_feats : list or None, optional
+            A list of features that should be fit completely before fitting all other features.
+        
+        Returns
+        -------
+        pandas.DataFrame
+            A DataFrame containing the regularization path.
+        """
+        
+        return super().get_regularization_path(X, y, init_reg_param, partialed_feats=partialed_feats)
+    
 
 class DNAMiteBinaryClassifier(BaseDNAMiteModel):
     """
@@ -3225,6 +3251,35 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         preds = 1 / (1 + np.exp(-preds))
         
         return {"AUC": roc_auc_score(y, preds)}
+    
+    def get_regularization_path(self, X, y, init_reg_param, partialed_feats=None):
+        """
+        Get the regularization path for the model.
+        
+        Parameters
+        ----------
+        X : pandas.DataFrame, shape (n_samples, n_features)
+            The input features for the model.
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The target variable.
+        init_reg_param : float
+            Initial regularization parameter.
+        partialed_feats : list or None, optional
+            A list of features that should be fit completely before fitting all other features.
+        
+        Returns
+        -------
+        pandas.DataFrame
+            A DataFrame containing the regularization path.
+        """
+        
+        if not hasattr(self, "label_encoder"):
+            self.label_encoder = LabelEncoder()
+            y = self.label_encoder.fit_transform(y)
+        else:
+            y = self.label_encoder.transform(y)
+        
+        return super().get_regularization_path(X, y, init_reg_param, partialed_feats=partialed_feats)
     
 
 class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
@@ -4498,10 +4553,39 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
         is_cat_cols = [self.feature_dtypes[self.feature_names_in_.get_loc(f)] != 'continuous' for f in feature_names]
         
-        num_axes = sum([2 if not c and plot_missing_bin else 1 for _, c in zip(feature_names, is_cat_cols)])
+        num_main_plots = len(feature_names)
+        num_missing_bin_plots = sum([1 if not c and plot_missing_bin else 0 for c in is_cat_cols])
+        num_axes = num_main_plots + num_missing_bin_plots
+
+        if plot_missing_bin:
+        
+            fig = plt.figure(figsize=(4*num_main_plots + num_missing_bin_plots, 4*len(eval_times)))
+            
+            width_ratios = []
+            for i in range(num_main_plots):
+                if not is_cat_cols[i]:
+                    width_ratios.extend([10, 1])
+                else:
+                    width_ratios.append(10)
+                    
+            gs = gridspec.GridSpec(len(eval_times), num_axes, width_ratios=width_ratios)
+            axes = np.array([[fig.add_subplot(gs[i, j]) for j in range(num_axes)] for i in range(len(eval_times))])
+            
+        else:
+            fig, axes = plt.subplots(len(eval_times), num_axes, figsize=(4*num_axes, 4*len(eval_times)))
+            if not isinstance(axes, np.ndarray):
+                axes = np.array(axes)
+            if len(feature_names) == 1:
+                axes = axes.reshape(-1, 1)
+            if len(eval_times) == 1:
+                axes = axes.reshape(1, -1)
+        
+        
+        
+        # num_axes = sum([2 if not c and plot_missing_bin else 1 for _, c in zip(feature_names, is_cat_cols)])
         # num_axes = num_axes * len(eval_times)
         
-        if plot_missing_bin:
+        # if plot_missing_bin:
         
             # fig = plt.figure(figsize=(4*num_axes, 4))
             # fig = plt.figure(figsize=(4*num_axes, 4*len(eval_times)))
@@ -4516,32 +4600,31 @@ class DNAMiteSurvival(BaseDNAMiteModel):
 
             # axes = [fig.add_subplot(gs[i]) for i in generate_indices(len(feature_names))]
             
-            fig = plt.figure(figsize=(4 * len(feature_names), 4 * len(eval_times)))
+            # fig = plt.figure(figsize=(4 * len(feature_names), 4 * len(eval_times)))
 
-            # Create GridSpec with rows equal to len(eval_times) and appropriate columns
-            gs = gridspec.GridSpec(len(eval_times), 2 * len(feature_names) + len(feature_names) - 1, width_ratios=[10, 1, 2] * (len(feature_names) - 1) + [10, 1])
+            # # Create GridSpec with rows equal to len(eval_times) and appropriate columns
+            # gs = gridspec.GridSpec(len(eval_times), 2 * len(feature_names) + len(feature_names) - 1, width_ratios=[10, 1, 2] * (len(feature_names) - 1) + [10, 1])
 
-            def generate_indices(n_times, row):
-                """Generate indices for a specific row in the grid."""
-                indices = []
-                for i in range(n_times):
-                    indices.extend([row * (2 * n_times + n_times - 1) + i * 3, row * (2 * n_times + n_times - 1) + i * 3 + 1])
-                return indices
+            # def generate_indices(n_times, row):
+            #     """Generate indices for a specific row in the grid."""
+            #     indices = []
+            #     for i in range(n_times):
+            #         indices.extend([row * (2 * n_times + n_times - 1) + i * 3, row * (2 * n_times + n_times - 1) + i * 3 + 1])
+            #     return indices
 
-            # Create axes for all rows and columns
-            axes = [fig.add_subplot(gs[i]) for row in range(len(eval_times)) for i in generate_indices(len(feature_names), row)]
+            # # Create axes for all rows and columns
+            # axes = [fig.add_subplot(gs[i]) for row in range(len(eval_times)) for i in generate_indices(len(feature_names), row)]
             
-        else:
-            fig, axes = plt.subplots(len(eval_times), num_axes, figsize=(4*num_axes, 4*len(eval_times)))
-            # if len(axes) == 1:
-            #     axes = [axes]
-            if not isinstance(axes, np.ndarray):
-                axes = np.array(axes)
-            if len(feature_names) == 1:
-                axes = axes.reshape(-1, 1)
-            if len(eval_times) == 1:
-                axes = axes.reshape(1, -1)
-                
+        # else:
+        #     fig, axes = plt.subplots(len(eval_times), num_axes, figsize=(4*num_axes, 4*len(eval_times)))
+        #     # if len(axes) == 1:
+        #     #     axes = [axes]
+        #     if not isinstance(axes, np.ndarray):
+        #         axes = np.array(axes)
+        #     if len(feature_names) == 1:
+        #         axes = axes.reshape(-1, 1)
+        #     if len(eval_times) == 1:
+        #         axes = axes.reshape(1, -1)
         
         ax_idx = 0
         
@@ -4598,7 +4681,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                         bar_data = shape_data[shape_data["bin"].isna()]
                         axes[eval_idx, ax_idx].bar("NA", bar_data["score"].mean())
                         axes[eval_idx, ax_idx].errorbar("NA", bar_data["score"].mean(), yerr=1.96*bar_data["score"].sem(), fmt='none', color='black')
-                        axes[eval_idx, ax_idx].set_ylim(axes[0].get_ylim())
+                        axes[eval_idx, ax_idx].set_ylim(axes[eval_idx, 0].get_ylim())
                         axes[eval_idx, ax_idx].set_yticklabels([])
                         axes[eval_idx, ax_idx].set_xlim(-0.5, 0.5)
                         
@@ -4992,3 +5075,26 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             ax.set_title(f"Calibration at t={eval_time}")
             
         plt.tight_layout()
+        
+    def get_regularization_path(self, X, y, init_reg_param, partialed_feats=None):
+        """
+        Get the regularization path for the model.
+        
+        Parameters
+        ----------
+        X : pandas.DataFrame, shape (n_samples, n_features)
+            The input features for the model.
+        y : pandas.Series or numpy.ndarray, shape (n_samples,)
+            The target variable.
+        init_reg_param : float
+            Initial regularization parameter.
+        partialed_feats : list or None, optional
+            A list of features that should be fit completely before fitting all other features.
+        
+        Returns
+        -------
+        pandas.DataFrame
+            A DataFrame containing the regularization path.
+        """
+        
+        return super().get_regularization_path(X, y, init_reg_param, partialed_feats=partialed_feats)

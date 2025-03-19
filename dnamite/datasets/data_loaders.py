@@ -267,8 +267,8 @@ def fetch_mimic(data_path, return_benchmark_data=False):
     # ----------------- Step 5 -----------------
     # Fix the column names
 
-    items = pd.read_csv("/home/mvanness/mimic/mimic_raw_data/D_ITEMS.csv")
-    lab_items = pd.read_csv("/home/mvanness/mimic/mimic_raw_data/D_LABITEMS.csv")
+    items = pd.read_csv(os.path.join(data_path, "D_ITEMS.csv"))
+    lab_items = pd.read_csv(os.path.join(data_path, "D_LABITEMS.csv"))
 
     cohort_data_with_full_col_names = cohort_data.copy()
 
