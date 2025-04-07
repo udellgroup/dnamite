@@ -918,8 +918,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
 
     Parameters
     ----------
-    n_features : int
-        Number of input features in the data.
     n_output : int
         Number of output features.
     n_embed : int, default=32
@@ -945,8 +943,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         Batch size for training.
     device : str, default="cpu"
         Device for model computation, either "cpu" or "cuda".
-    pairs_list : list of tuple[int, int], optional
-        List of feature pairs to consider for interactions; if None, no specific pairs are used.
     kernel_size : int, default=5
         Size of the kernel used in smoothing for single features.
     kernel_weight : float, default=3
@@ -969,7 +965,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
     """
     
     def __init__(self, 
-                 n_features, 
                  n_output, 
                  n_embed=32, 
                  n_hidden=32,
@@ -994,7 +989,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
     ):
         nn.Module.__init__(self)
         LoggingMixin.__init__(self, verbosity=verbosity)
-        self.n_features = n_features
         self.n_embed = n_embed
         self.n_hidden = n_hidden
         self.n_output = n_output
@@ -1007,7 +1001,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         self.max_epochs = max_epochs
         self.batch_size = batch_size
         self.device = device
-        self.pairs_list = pairs_list
         self.kernel_size = kernel_size
         self.kernel_weight = kernel_weight
         self.pair_kernel_size = pair_kernel_size
@@ -1019,6 +1012,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         self.models = nn.ModuleList()
         self.fit_pairs = self.num_pairs > 0
+        
         
     def _set_gamma(self, X):
         if self.gamma is None:
@@ -1223,7 +1217,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         val_loader = self.get_data_loader(X_val, y_val, shuffle=False, **val_loader_args)
         
         model = _BaseSingleSplitDNAMiteModel(
-            n_features=X_train.shape[1], 
+            n_features=X_train.shape[1], # don't use n_features in case of selected_feats 
             n_output=self.n_output,
             feature_sizes=feature_sizes, 
             n_embed=self.n_embed,
@@ -1376,6 +1370,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             Entropy parameter to control the diversity or uncertainty.
         """
         
+        
         if isinstance(X, np.ndarray):
             raise ValueError("Input data must be a pandas DataFrame.")
         
@@ -1388,6 +1383,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         self.reg_param = reg_param
         self.pair_reg_param = pair_reg_param
         self.entropy_param = entropy_param
+        self.n_features = X.shape[1]
         
         if self.reg_param <= 0 and self.pair_reg_param <= 0:
             raise ValueError("Regularization parameters must be greater than 0 for feature selection.")
@@ -1568,6 +1564,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         self.pair_gamma = None
         self.pair_reg_param = 0
         self.entropy_param = 0
+        self.n_features = X.shape[1]
         
         n_feat_selected = np.inf
         losses = []
@@ -1707,7 +1704,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         return pair_scores
     
-    def fit(self, X, y, partialed_feats=None):
+    def fit(self, X, y, pairs_list=None, partialed_feats=None):
         """
         Train model.
 
@@ -1718,6 +1715,9 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
 
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The target variable or labels.
+            
+        pairs_list : list of tuple[int, int] or None, optional
+            List of feature pairs to consider for interactions; if None, no specific pairs are used.
 
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
@@ -1736,8 +1736,18 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                 self.logger.warning("Found selected features and pairs. Using only those features and pairs.")
             else:
                 self.logger.warning("Found selected features. Using only those features.")
+                
+        if pairs_list is not None and self.num_pairs > 0:
+            raise ValueError("Cannot specify pairs_list and num_pairs at the same time.")
         
         self.feature_names_in_ = X.columns
+        self.n_features = X.shape[1]
+        self.pairs_list = pairs_list
+        if pairs_list is not None:
+            self.fit_pairs = True
+            self.pairs_list = [
+                (X.columns.get_loc(feat1), X.columns.get_loc(feat2)) for feat1, feat2 in pairs_list
+            ]
         
         # First discretize the data
         X_discrete = self._discretize_data(X)
@@ -1849,24 +1859,25 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             for i, col in enumerate(model.feature_names_in_):
                 feat_bin_scores = model.bin_scores[i].squeeze()
                 bin_counts = model.bin_counts[i]
+                feat_idx = self.feature_names_in_.get_loc(col)
+                missing_bin_count = bin_counts[0] if self.has_missing_bin[feat_idx] else 0
                 
-                if missing_bin != "include" and self.has_missing_bin[i]:
+                if missing_bin != "include" and self.has_missing_bin[feat_idx]:
                     missing_bin_score = feat_bin_scores[0]
                     feat_bin_scores = feat_bin_scores[1:]
                     bin_counts = bin_counts[1:]
-                if missing_bin == "ignore" and not self.has_missing_values[i]:
+                if missing_bin == "ignore" and not self.has_missing_values[feat_idx]:
                     feat_bin_scores = feat_bin_scores[1:]
                     bin_counts = bin_counts[1:]
                 
                 feat_importance = np.sum(np.abs(feat_bin_scores) * np.array(bin_counts)) / np.sum(bin_counts)
                 
                 if missing_bin == "stratify":
-                    if self.has_missing_bin[i]:
-                        missing_importance = np.abs(missing_bin_score)
-                    else:
-                        missing_importance = np.nan
                     importances.append([split, col, feat_importance, "observed", len(feat_bin_scores)])
-                    if self.has_missing_values[i]:
+                    if self.has_missing_values[feat_idx]:
+                        if missing_bin_count == 0:
+                            raise ValueError(f"Tried to compute a missing bin feature score for a feature without a missing bin.")
+                        missing_importance = np.abs(missing_bin_score)
                         importances.append([split, col, missing_importance, "missing", 1])
                 else:
                     importances.append([split, col, feat_importance, len(feat_bin_scores)])
@@ -2002,6 +2013,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         """
         
         is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
+        has_missing_values = self.has_missing_values[self.feature_names_in_.get_loc(feature_name)]
         
         dfs = []
         for i, model in enumerate(self.models):
@@ -2012,22 +2024,32 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             
             if not is_cat_col:
                 
-                feat_bin_values = np.concatenate([
-                    [np.nan],
-                    [model.feature_bins[col_index].min() - 0.01],
-                    model.feature_bins[col_index]
-                ])
+                if has_missing_values:
+                    feat_bin_values = np.concatenate([
+                        [np.nan],
+                        [model.feature_bins[col_index].min() - 0.01],
+                        model.feature_bins[col_index]
+                    ])
+                    bin_counts = model.bin_counts[col_index]
+                else:
+                    feat_bin_scores = feat_bin_scores[1:]
+                    feat_bin_values = np.concatenate([
+                        [model.feature_bins[col_index].min() - 0.01],
+                        model.feature_bins[col_index]
+                    ])
+                    bin_counts = model.bin_counts[col_index][1:]
                 
             else:
                 
                 feat_bin_values = model.feature_bins[col_index]
+                bin_counts = model.bin_counts[col_index]
                 
             dfs.append(
                 pd.DataFrame({
                     "feature": feature_name,
                     "bin": feat_bin_values,
                     "score": feat_bin_scores,
-                    "count": model.bin_counts[col_index],
+                    "count": bin_counts,
                     "split": i
                 })
             )
@@ -2062,9 +2084,10 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             feature_names = [feature_names]
             
         is_cat_cols = [self.feature_dtypes[self.feature_names_in_.get_loc(f)] != 'continuous' for f in feature_names]
+        has_missing_values = [self.has_missing_values[self.feature_names_in_.get_loc(f)] for f in feature_names]
 
         num_main_plots = len(feature_names)
-        num_missing_bin_plots = sum([1 if not c and plot_missing_bin else 0 for c in is_cat_cols])
+        num_missing_bin_plots = sum([1 if not c and m and plot_missing_bin else 0 for c, m in zip(is_cat_cols, has_missing_values)])
         num_axes = num_main_plots + num_missing_bin_plots
 
         if axes is None:
@@ -2074,7 +2097,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                 
                 width_ratios = []
                 for i in range(num_main_plots):
-                    if not is_cat_cols[i]:
+                    if not is_cat_cols[i] and has_missing_values[i]:
                         width_ratios.extend([10, 1])
                     else:
                         width_ratios.append(10)
@@ -2087,15 +2110,15 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                     axes = [axes]
                     
             # set_font_sizes(axes)
-
         ax_idx = 0
 
         for feature_name in feature_names:
             shape_data = self.get_shape_function(feature_name)
             is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
+            has_missing_values = self.has_missing_values[self.feature_names_in_.get_loc(feature_name)]
             
             if not is_cat_col:
-                if not plot_missing_bin:
+                if not plot_missing_bin or not has_missing_values:
                     line_plot_data = shape_data[shape_data["bin"].notna()].groupby("bin")["score"]
                     axes[ax_idx].plot(line_plot_data.mean().index, line_plot_data.mean(), drawstyle='steps-post')
                     axes[ax_idx].fill_between(
@@ -2135,14 +2158,15 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                     bar_data = shape_data[shape_data["bin"].isna()]
                     axes[ax_idx].bar("NA", bar_data["score"].mean())
                     axes[ax_idx].errorbar("NA", bar_data["score"].mean(), yerr=1.96*bar_data["score"].sem(), fmt='none', color='black')
-                    axes[ax_idx].set_ylim(axes[0].get_ylim())
-                    axes[ax_idx].set_yticklabels([])
+                    # axes[ax_idx].set_ylim(axes[0].get_ylim())
+                    # axes[ax_idx].set_yticklabels([])
                     axes[ax_idx].set_xlim(-0.5, 0.5)
                     
                     ax_idx += 1
                     
             else:
-                sns.barplot(x="bin", y="score", data=shape_data, errorbar=('ci', 95), ax=axes[ax_idx])
+                shape_data = shape_data.fillna("Missing")
+                sns.barplot(x="bin", y="score", data=shape_data, errorbar=('ci', 95), ax=axes[ax_idx], color=sns.color_palette()[0])
                 axes[ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
                 axes[ax_idx].tick_params(axis='x', rotation=45)
                 for label in axes[ax_idx].get_xticklabels():
@@ -2289,8 +2313,6 @@ class DNAMiteRegressor(BaseDNAMiteModel):
 
     Parameters
     ----------
-    n_features : int
-        The number of input features.
     n_embed : int, optional (default=32)
         The size of the embedding layer.
     n_hidden : int, optional (default=32)
@@ -2339,7 +2361,6 @@ class DNAMiteRegressor(BaseDNAMiteModel):
     """
     
     def __init__(self,
-                 n_features, 
                  n_embed=32, 
                  n_hidden=32, 
                  max_bins=32, 
@@ -2361,7 +2382,6 @@ class DNAMiteRegressor(BaseDNAMiteModel):
                  random_state=None
     ):
         super().__init__(
-            n_features=n_features,
             n_embed=n_embed,
             n_hidden=n_hidden,
             n_output=1,
@@ -2527,7 +2547,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         
         return total_loss / len(test_loader), torch.cat(preds)
     
-    def fit(self, X, y, partialed_feats=None):
+    def fit(self, X, y, pairs_list=None, partialed_feats=None):
         """
         Train model.
 
@@ -2540,6 +2560,9 @@ class DNAMiteRegressor(BaseDNAMiteModel):
 
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The labels, should be floats in (-inf, inf).
+            
+        pairs_list : list of tuple[int, int] or None, optional
+            List of feature pairs to consider for interactions; if None, no specific pairs are used.
 
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
@@ -2555,7 +2578,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         else:
             y = self.label_scaler.transform(y.reshape(-1, 1)).squeeze()
         
-        return super().fit(X, y, partialed_feats=partialed_feats)
+        return super().fit(X, y, pairs_list=pairs_list, partialed_feats=partialed_feats)
     
     def get_feature_importances(self, missing_bin="include"):
         """
@@ -2741,13 +2764,13 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         )
     
     def _score(self, X, y, y_train=None, model=None):
-        from sklearn.metrics import mean_squared_error
+        from sklearn.metrics import r2_score
         preds = self._predict(X, models=[model])
         
         preds = self.label_scaler.inverse_transform(preds.reshape(-1, 1)).squeeze()
         y = self.label_scaler.inverse_transform(y.reshape(-1, 1)).squeeze()
                 
-        return {"RMSE": np.sqrt(mean_squared_error(y, preds))}
+        return {"R2": r2_score(y, preds)}
     
     def get_regularization_path(self, X, y, init_reg_param, partialed_feats=None):
         """
@@ -2770,6 +2793,16 @@ class DNAMiteRegressor(BaseDNAMiteModel):
             A DataFrame containing the regularization path.
         """
         
+        if type(y) == pd.Series:
+            y = y.values
+        
+        # Standardize the labels
+        if not hasattr(self, "label_scaler"):
+            self.label_scaler = StandardScaler()
+            y = self.label_scaler.fit_transform(y.reshape(-1, 1)).squeeze()
+        else:
+            y = self.label_scaler.transform(y.reshape(-1, 1)).squeeze()
+        
         return super().get_regularization_path(X, y, init_reg_param, partialed_feats=partialed_feats)
     
 
@@ -2779,8 +2812,6 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
 
     Parameters
     ----------
-    n_features : int
-        The number of input features.
     n_embed : int, optional (default=32)
         The size of the embedding layer.
     n_hidden : int, optional (default=32)
@@ -2830,7 +2861,6 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
     
     
     def __init__(self,
-                 n_features, 
                  n_embed=32, 
                  n_hidden=32, 
                  max_bins=32, 
@@ -2852,7 +2882,6 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
                  random_state=None
     ):
         super().__init__(
-            n_features=n_features,
             n_embed=n_embed,
             n_hidden=n_hidden,
             n_output=1,
@@ -3017,7 +3046,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         
         return total_loss / len(test_loader), torch.cat(preds)
     
-    def fit(self, X, y, partialed_feats=None):
+    def fit(self, X, y, pairs_list=None, partialed_feats=None):
         """
         Train model.
 
@@ -3030,6 +3059,9 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
 
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The labels. Should have two unique values.
+            
+        pairs_list : list of tuple[int, int] or None, optional
+            List of feature pairs to consider for interactions; if None, no specific pairs are used.
 
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
@@ -3044,7 +3076,7 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         else:
             y = self.label_encoder.transform(y)
         
-        return super().fit(X, y, partialed_feats=partialed_feats)
+        return super().fit(X, y, pairs_list=pairs_list, partialed_feats=partialed_feats)
     
     def get_feature_importances(self, missing_bin="include"):
         """
@@ -3602,7 +3634,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             
         return pd.concat(dfs)
     
-    def fit(self, X, y, partialed_feats=None):
+    def fit(self, X, y, pairs_list=None, partialed_feats=None):
         """
         Train model.
 
@@ -3615,11 +3647,14 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
 
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The labels, should be label encoded as 0, 1, ..., n_classes-1.
+            
+        pairs_list : list of tuple[int, int] or None, optional
+            List of feature pairs to consider for interactions; if None, no specific pairs are used.
 
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
         """
-        return super().fit(X, y, partialed_feats=partialed_feats)
+        return super().fit(X, y, pairs_list=pairs_list, partialed_feats=partialed_feats)
     
     def get_pair_shape_function(self, feat1_name, feat2_name):
         """
@@ -3775,8 +3810,6 @@ class DNAMiteSurvival(BaseDNAMiteModel):
 
     Parameters
     ----------
-    n_features : int
-        The number of input features.
     n_eval_times : int, optional (default=100)
         The number of evaluation times for survival analysis.
     n_embed : int, optional (default=32)
@@ -3834,7 +3867,6 @@ class DNAMiteSurvival(BaseDNAMiteModel):
     
     def __init__(
         self, 
-        n_features, 
         n_eval_times=100,
         n_embed=32,
         n_hidden=32, 
@@ -3859,7 +3891,6 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         censor_estimator="km"
     ):
         super().__init__(
-            n_features=n_features,
             n_embed=n_embed,
             n_hidden=n_hidden,
             n_output=n_eval_times,
@@ -4239,7 +4270,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             val_loader_args={"pcw_obs_times": self.pcw_obs_times[0]["val"]}
         )
     
-    def fit(self, X, y, partialed_feats=None):
+    def fit(self, X, y, pairs_list=None, partialed_feats=None):
         """
         Train model.
 
@@ -4250,6 +4281,9 @@ class DNAMiteSurvival(BaseDNAMiteModel):
 
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The target variable or labels.
+            
+        pairs_list : list of tuple[int, int] or None, optional
+            List of feature pairs to consider for interactions; if None, no specific pairs are used.
 
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
@@ -4295,7 +4329,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             })
         
         
-        super().fit(X, y, partialed_feats=partialed_feats)
+        super().fit(X, y, pairs_list=pairs_list, partialed_feats=partialed_feats)
         
         return
     
@@ -4342,27 +4376,35 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             for i, col in enumerate(model.feature_names_in_):
                 feat_bin_scores = model.bin_scores[i]
                 bin_counts = model.bin_counts[i]
+                feat_idx = self.feature_names_in_.get_loc(col)
+                missing_bin_count = bin_counts[0] if self.has_missing_bin[feat_idx] else 0
                 
-                if missing_bin != "include" and self.has_missing_bin[i]:
-                    missing_bin_score = feat_bin_scores[0, :]
-                    feat_bin_scores = feat_bin_scores[1:, :]
+                if missing_bin != "include" and self.has_missing_bin[feat_idx]:
+                    missing_bin_score = feat_bin_scores[0]
+                    feat_bin_scores = feat_bin_scores[1:]
+                    bin_counts = bin_counts[1:]
+                if missing_bin == "ignore" and not self.has_missing_values[feat_idx]:
+                    feat_bin_scores = feat_bin_scores[1:]
                     bin_counts = bin_counts[1:]
                 
                 if eval_time is not None:
                     feat_importance = np.sum(np.abs(feat_bin_scores[:, eval_index]) * np.array(bin_counts)) / np.sum(bin_counts)
                 else:
                     feat_importance = np.sum(np.abs(feat_bin_scores) * np.array(bin_counts).reshape(-1, 1)) / np.sum(bin_counts)
-                
+
+                    
                 if missing_bin == "stratify":
-                    if self.has_missing_bin[i]:
+                    importances.append([split, col, feat_importance, "observed", len(feat_bin_scores)])
+                    if self.has_missing_values[feat_idx]:
+                        if missing_bin_count == 0:
+                            raise ValueError(f"Tried to compute a missing bin feature score for a feature without a missing bin.")
+                        
                         if eval_time is not None:
                             missing_importance = np.abs(missing_bin_score[eval_index])
                         else:
                             missing_importance = np.sum(np.abs(missing_bin_score))
-                    else:
-                        missing_importance = np.nan
-                    importances.append([split, col, feat_importance, "observed", len(feat_bin_scores)])
-                    importances.append([split, col, missing_importance, "missing", 1])
+                            
+                        importances.append([split, col, missing_importance, "missing", 1])
                 else:
                     importances.append([split, col, feat_importance, len(feat_bin_scores)])
                 
@@ -4491,6 +4533,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             A DataFrame containing the bin scores for the feature.
         """
         is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
+        has_missing_values = self.has_missing_values[self.feature_names_in_.get_loc(feature_name)]
         
         eval_index = np.searchsorted(self.eval_times.cpu().numpy(), eval_time)
         
@@ -4504,22 +4547,32 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
             if not is_cat_col:
                 
-                feat_bin_values = np.concatenate([
-                    [np.nan],
-                    [model.feature_bins[col_index].min() - 0.01],
-                    model.feature_bins[col_index]
-                ])
+                if has_missing_values:
+                    feat_bin_values = np.concatenate([
+                        [np.nan],
+                        [model.feature_bins[col_index].min() - 0.01],
+                        model.feature_bins[col_index]
+                    ])
+                    bin_counts = model.bin_counts[col_index]
+                else:
+                    feat_bin_scores = feat_bin_scores[1:]
+                    feat_bin_values = np.concatenate([
+                        [model.feature_bins[col_index].min() - 0.01],
+                        model.feature_bins[col_index]
+                    ])
+                    bin_counts = model.bin_counts[col_index][1:]
                 
             else:
                 
                 feat_bin_values = model.feature_bins[col_index]
+                bin_counts = model.bin_counts[col_index]
                 
             dfs.append(
                 pd.DataFrame({
                     "feature": feature_name,
                     "bin": feat_bin_values,
                     "score": feat_bin_scores,
-                    "count": model.bin_counts[col_index],
+                    "count": bin_counts,
                     "split": i
                 })
             )
@@ -4552,9 +4605,10 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             eval_times = [eval_times]
             
         is_cat_cols = [self.feature_dtypes[self.feature_names_in_.get_loc(f)] != 'continuous' for f in feature_names]
+        has_missing_values = [self.has_missing_values[self.feature_names_in_.get_loc(f)] for f in feature_names]
         
         num_main_plots = len(feature_names)
-        num_missing_bin_plots = sum([1 if not c and plot_missing_bin else 0 for c in is_cat_cols])
+        num_missing_bin_plots = sum([1 if not c and m and plot_missing_bin else 0 for c, m in zip(is_cat_cols, has_missing_values)])
         num_axes = num_main_plots + num_missing_bin_plots
 
         if plot_missing_bin:
@@ -4563,11 +4617,11 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
             width_ratios = []
             for i in range(num_main_plots):
-                if not is_cat_cols[i]:
+                if not is_cat_cols[i] and has_missing_values[i]:
                     width_ratios.extend([10, 1])
                 else:
                     width_ratios.append(10)
-                    
+                   
             gs = gridspec.GridSpec(len(eval_times), num_axes, width_ratios=width_ratios)
             axes = np.array([[fig.add_subplot(gs[i, j]) for j in range(num_axes)] for i in range(len(eval_times))])
             
@@ -4579,8 +4633,6 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                 axes = axes.reshape(-1, 1)
             if len(eval_times) == 1:
                 axes = axes.reshape(1, -1)
-        
-        
         
         # num_axes = sum([2 if not c and plot_missing_bin else 1 for _, c in zip(feature_names, is_cat_cols)])
         # num_axes = num_axes * len(eval_times)
@@ -4635,11 +4687,12 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             for feature_name in feature_names:
                 
                 is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
+                has_missing_values = self.has_missing_values[self.feature_names_in_.get_loc(feature_name)]
                 
                 shape_data = self.get_shape_function(feature_name, eval_time)
                 
                 if not is_cat_col:
-                    if not plot_missing_bin:
+                    if not plot_missing_bin or not has_missing_values:
                         line_plot_data = shape_data[shape_data["bin"].notna()].groupby("bin")["score"]
                         axes[eval_idx, ax_idx].plot(line_plot_data.mean().index, line_plot_data.mean(), drawstyle='steps-post')
                         axes[eval_idx, ax_idx].fill_between(
@@ -4681,26 +4734,26 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                         bar_data = shape_data[shape_data["bin"].isna()]
                         axes[eval_idx, ax_idx].bar("NA", bar_data["score"].mean())
                         axes[eval_idx, ax_idx].errorbar("NA", bar_data["score"].mean(), yerr=1.96*bar_data["score"].sem(), fmt='none', color='black')
-                        axes[eval_idx, ax_idx].set_ylim(axes[eval_idx, 0].get_ylim())
-                        axes[eval_idx, ax_idx].set_yticklabels([])
+                        # axes[eval_idx, ax_idx].set_ylim(axes[eval_idx, 0].get_ylim())
+                        # axes[eval_idx, ax_idx].set_yticklabels([])
                         axes[eval_idx, ax_idx].set_xlim(-0.5, 0.5)
                         
                         ax_idx += 1
                         
                 else:
-                    shape_data = shape_data.fillna("NA")
-                    sns.barplot(x="bin", y="score", data=shape_data, errorbar=('ci', 95), ax=axes[eval_idx, ax_idx])
+                    
+                    shape_data = shape_data.fillna("Missing")
+                    sns.barplot(x="bin", y="score", data=shape_data, errorbar=('ci', 95), ax=axes[eval_idx, ax_idx], color=sns.color_palette()[0])
                     axes[eval_idx, ax_idx].set_xlabel("\n".join(textwrap.wrap(feature_name, width=25)))
                     axes[eval_idx, ax_idx].tick_params(axis='x', rotation=45)
                     for label in axes[eval_idx, ax_idx].get_xticklabels():
                         label.set_ha('right')
                     if ax_idx == 0:
-                        axes[eval_idx, ax_idx].set_ylabel(yaxis_label)
+                        axes[eval_idx, ax_idx].set_ylabel("\n".join(textwrap.wrap(yaxis_label, width=25)))
                     else:
                         axes[eval_idx, ax_idx].set_ylabel("")
-                        
                     ax_idx += 1
-                
+                    
         plt.tight_layout()
     
     def get_pair_shape_function(self, feat1_name, feat2_name, eval_time):
@@ -4803,7 +4856,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         # Round the values in the columns and index
         # Round the index and columns to 3 decimal places and reassign 
         if pair_data_dnamite.index.dtype == 'float64':
-            pair_data_dnamite.index = pair_data_dnamite.index.round(3)
+            pair_data_dnamite.index = pair_data_dnamite.index.to_series().round(3)
         if pair_data_dnamite.columns.dtype == 'float64':
             pair_data_dnamite.columns = pair_data_dnamite.columns.round(3)
         
