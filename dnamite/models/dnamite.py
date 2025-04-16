@@ -977,7 +977,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                  max_epochs=100, 
                  batch_size=128, 
                  device="cpu", 
-                 pairs_list=None,
                  kernel_size=5, 
                  kernel_weight=3, 
                  pair_kernel_size=3, 
@@ -1181,6 +1180,10 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         # Set random seed if one is provided
         if random_state is not None:
             torch.manual_seed(random_state)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed(random_state)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
             np.random.seed(random_state)
         
         # If selected_feats is set, only use those features
@@ -1400,6 +1403,10 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         # Set random seed if one is provided
         if self.random_state is not None:
             torch.manual_seed(self.random_state)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed(self.random_state)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
             np.random.seed(self.random_state)
             
         if partialed_feats is not None:
@@ -1617,6 +1624,10 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         # Set random seed if one is provided
         if self.random_state is not None:
             torch.manual_seed(self.random_state)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed(self.random_state)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
             np.random.seed(self.random_state)
         
         pair_reg_param = 0.01
@@ -1716,8 +1727,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The target variable or labels.
             
-        pairs_list : list of tuple[int, int] or None, optional
-            List of feature pairs to consider for interactions; if None, no specific pairs are used.
+        pairs_list : list of tuple[str, str] or None, optional
+            List of feature interactions to include; if None, no specific pairs are used.
 
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
@@ -2334,11 +2345,6 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         The batch size for training.
     device : str, optional (default="cpu")
         The device to run the model on ("cpu" or "cuda").
-    pairs_list : list of tuple[int, int], optional
-        List of pairs to use in the model.
-        Each entry should be a pair of indices corresponding to the features.
-        Should only be set if manual pair selection is desired.
-        Set num_pairs instead for automatic pair selection.
     kernel_size : int, optional (default=5)
         The size of the kernel in convolutional layers for single features.
     kernel_weight : float, optional (default=3)
@@ -2371,7 +2377,6 @@ class DNAMiteRegressor(BaseDNAMiteModel):
                  max_epochs=100, 
                  batch_size=128, 
                  device="cpu", 
-                 pairs_list=None,
                  kernel_size=5, 
                  kernel_weight=3, 
                  pair_kernel_size=3, 
@@ -2393,7 +2398,6 @@ class DNAMiteRegressor(BaseDNAMiteModel):
             max_epochs=max_epochs,
             batch_size=batch_size,
             device=device,
-            pairs_list=pairs_list,
             kernel_size=kernel_size,
             kernel_weight=kernel_weight,
             pair_kernel_size=pair_kernel_size,
@@ -2561,8 +2565,8 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The labels, should be floats in (-inf, inf).
             
-        pairs_list : list of tuple[int, int] or None, optional
-            List of feature pairs to consider for interactions; if None, no specific pairs are used.
+        pairs_list : list of tuple[str, str] or None, optional
+            List of feature interactions to include; if None, no specific pairs are used.
 
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
@@ -2833,11 +2837,6 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         The batch size for training.
     device : str, optional (default="cpu")
         The device to run the model on ("cpu" or "cuda").
-    pairs_list : list of tuple[int, int], optional
-        List of pairs to use in the model.
-        Each entry should be a pair of indices corresponding to the features.
-        Should only be set if manual pair selection is desired.
-        Set num_pairs instead for automatic pair selection.
     kernel_size : int, optional (default=5)
         The size of the kernel in convolutional layers for single features.
     kernel_weight : float, optional (default=3)
@@ -2871,7 +2870,6 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
                  max_epochs=100, 
                  batch_size=128, 
                  device="cpu", 
-                 pairs_list=None,
                  kernel_size=5, 
                  kernel_weight=3, 
                  pair_kernel_size=3, 
@@ -2893,7 +2891,6 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             max_epochs=max_epochs,
             batch_size=batch_size,
             device=device,
-            pairs_list=pairs_list,
             kernel_size=kernel_size,
             kernel_weight=kernel_weight,
             pair_kernel_size=pair_kernel_size,
@@ -3060,8 +3057,8 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The labels. Should have two unique values.
             
-        pairs_list : list of tuple[int, int] or None, optional
-            List of feature pairs to consider for interactions; if None, no specific pairs are used.
+        pairs_list : list of tuple[str, str] or None, optional
+            List of feature interactions to include; if None, no specific pairs are used.
 
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
@@ -3345,11 +3342,6 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         The batch size for training.
     device : str, optional (default="cpu")
         The device to run the model on ("cpu" or "cuda").
-    pairs_list : list of tuple[int, int], optional
-        List of pairs to use in the model.
-        Each entry should be a pair of indices corresponding to the features.
-        Should only be set if manual pair selection is desired.
-        Set num_pairs instead for automatic pair selection.
     kernel_size : int, optional (default=5)
         The size of the kernel in convolutional layers for single features.
     kernel_weight : float, optional (default=3)
@@ -3384,7 +3376,6 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
                  max_epochs=100, 
                  batch_size=128, 
                  device="cpu",  
-                 pairs_list=None,
                  kernel_size=5, 
                  kernel_weight=3, 
                  pair_kernel_size=3, 
@@ -3407,7 +3398,6 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             max_epochs=max_epochs,
             batch_size=batch_size,
             device=device,
-            pairs_list=pairs_list,
             kernel_size=kernel_size,
             kernel_weight=kernel_weight,
             pair_kernel_size=pair_kernel_size,
@@ -3648,8 +3638,8 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The labels, should be label encoded as 0, 1, ..., n_classes-1.
             
-        pairs_list : list of tuple[int, int] or None, optional
-            List of feature pairs to consider for interactions; if None, no specific pairs are used.
+        pairs_list : list of tuple[str, str] or None, optional
+            List of feature interactions to include; if None, no specific pairs are used.
 
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
@@ -3835,11 +3825,6 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         The batch size for training.
     device : str, optional (default="cpu")
         The device to run the model on ("cpu" or "cuda").
-    pairs_list : list of tuple[int, int], optional
-        List of pairs to use in the model.
-        Each entry should be a pair of indices corresponding to the features.
-        Should only be set if manual pair selection is desired.
-        Set num_pairs instead for automatic pair selection.
     kernel_size : int, optional (default=5)
         The size of the kernel in convolutional layers.
     kernel_weight : float, optional (default=3)
@@ -3879,7 +3864,6 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         max_epochs=100, 
         batch_size=128, 
         device="cpu", 
-        pairs_list=None, 
         kernel_size=5, 
         kernel_weight=3, 
         pair_kernel_size=3, 
@@ -3903,7 +3887,6 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             max_epochs=max_epochs,
             batch_size=batch_size,
             device=device,
-            pairs_list=pairs_list,
             kernel_size=kernel_size,
             kernel_weight=kernel_weight,
             pair_kernel_size=pair_kernel_size,
@@ -4282,8 +4265,8 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         y : pandas.Series or numpy.ndarray, shape (n_samples,)
             The target variable or labels.
             
-        pairs_list : list of tuple[int, int] or None, optional
-            List of feature pairs to consider for interactions; if None, no specific pairs are used.
+        pairs_list : list of tuple[str, str] or None, optional
+            List of feature interactions to include; if None, no specific pairs are used.
 
         partialed_feats : list or None, optional
             A list of features that should be fit completely before fitting all other features.
