@@ -13,13 +13,11 @@ import matplotlib.gridspec as gridspec
 import seaborn as sns
 from itertools import combinations
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import OrdinalEncoder, LabelEncoder, StandardScaler
-from sklearn.compose import make_column_transformer
-from sklearn.metrics import mean_squared_error, roc_auc_score
 from sksurv.nonparametric import CensoringDistributionEstimator, kaplan_meier_estimator
 from sksurv.linear_model import CoxPHSurvivalAnalysis
 from tqdm import tqdm
-import os
 from functools import partial
 from dnamite.utils import discretize, get_bin_counts, get_pair_bin_counts
 from dnamite.loss_fns import ipcw_rps_loss
@@ -27,6 +25,7 @@ import textwrap
 from contextlib import nullcontext
 import copy
 from dnamite.utils import LoggingMixin
+from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin
 
 # Class for a DNAMite model fit to one train/validation split
 # Full DNAMite model averages several of these single-split models
@@ -133,7 +132,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
         self.n_embed = n_embed
         self.n_hidden = n_hidden
         self.n_output = n_output
-        self.feature_sizes = torch.tensor(feature_sizes).to(device)
+        self.feature_sizes_ = torch.tensor(feature_sizes).to(device)
         self.n_layers = n_layers
         self.gamma = gamma
         self.pair_gamma = pair_gamma if pair_gamma is not None else gamma
@@ -160,9 +159,9 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
         self.init_pairs_params(self.n_pairs)
             
         if cat_feat_mask is not None:
-            self.cat_feat_mask = cat_feat_mask.to(device)
+            self.cat_feat_mask_ = cat_feat_mask.to(device)
         else:
-            self.cat_feat_mask = torch.zeros(n_features).astype(bool).to(device)
+            self.cat_feat_mask_ = torch.zeros(n_features).astype(bool).to(device)
             
         self.monotone_constraints = monotone_constraints
         if monotone_constraints is not None:
@@ -386,7 +385,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
                 # weights now of shape (batch_size, n_features, 2 * kernel_size + 1)
                 # Add a <= instead of < on left side to eliminate weight on missing bin
                 weights = torch.where(
-                    (mains <= self.embedding_offsets[self.active_feats].reshape(1, -1, 1)) | (mains >= self.embedding_offsets[self.active_feats].reshape(1, -1, 1) + self.feature_sizes[self.active_feats].reshape(1, -1, 1)),
+                    (mains <= self.embedding_offsets[self.active_feats].reshape(1, -1, 1)) | (mains >= self.embedding_offsets[self.active_feats].reshape(1, -1, 1) + self.feature_sizes_[self.active_feats].reshape(1, -1, 1)),
                     torch.zeros_like(weights),
                     weights
                 )
@@ -394,7 +393,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
                 # Zero out weights for categorical feats
                 weights = torch.where(
                     torch.logical_and(
-                        self.cat_feat_mask[self.active_feats].reshape(1, -1, 1),
+                        self.cat_feat_mask_[self.active_feats].reshape(1, -1, 1),
                         weights != 1
                     ),
                     torch.zeros_like(weights),
@@ -444,7 +443,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
                 pairs = pairs[:, self.active_pairs, :]
             
             # Get cat_feat_mask
-            pairs_cat_feat_mask = self.cat_feat_mask[self.pairs_list[self.active_pairs]]
+            pairs_cat_feat_mask = self.cat_feat_mask_[self.pairs_list[self.active_pairs]]
             
             # Add offsets to features to get the correct indices
             # offsets is of shape (n_pairs, 2)
@@ -460,7 +459,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
                 # Will be shape (2 * pair_kernel_size + 1, 2 * pair_kernel_size + 1)
                 weights = self._get_pair_weights()
                 
-                pair_sizes = self.feature_sizes[self.pairs_list[self.active_pairs]].to(self.device)
+                pair_sizes = self.feature_sizes_[self.pairs_list[self.active_pairs]].to(self.device)
                 
                 # Add a <= instead of < on left side so eliminate weight on missing bin
                 # weights is now (batch_size, n_pairs, 2 * pair_kernel_size + 1, 2 * pair_kernel_size + 1)
@@ -617,21 +616,21 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
         
         with context:
         
-            feat_inputs = torch.arange(0, self.feature_sizes[feat_index]).to(self.device)
+            feat_inputs = torch.arange(0, self.feature_sizes_[feat_index]).to(self.device)
             
             # Add offsets to features to get the correct indices
             # offsets = torch.tensor(self.embedding_offsets).unsqueeze(0).expand(inputs.size(0), -1).to(self.device)
             offset = self.embedding_offsets[feat_index]
             inputs = feat_inputs + offset
             
-            if self.kernel_size > 0 and self.kernel_weight > 0 and not self.cat_feat_mask[feat_index]:
+            if self.kernel_size > 0 and self.kernel_weight > 0 and not self.cat_feat_mask_[feat_index]:
                 
                 # Apply kernel smoothing to the embeddings
                 inputs = inputs.unsqueeze(-1) + torch.arange(-self.kernel_size, self.kernel_size+1).to(self.device)
                 weights = torch.exp(-torch.square(torch.arange(-self.kernel_size, self.kernel_size+1).to(self.device)) / (2 * self.kernel_weight))
                 
                 weights = torch.where(
-                    (inputs <= offset) | (inputs >= offset + self.feature_sizes[feat_index]),
+                    (inputs <= offset) | (inputs >= offset + self.feature_sizes_[feat_index]),
                     torch.zeros_like(weights),
                     weights
                 )
@@ -694,8 +693,8 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
             pair = self.pairs_list[pair_index]
             
             # Get the sizes of the features in the pair
-            size1 = self.feature_sizes[pair[0]]
-            size2 = self.feature_sizes[pair[1]]
+            size1 = self.feature_sizes_[pair[0]]
+            size2 = self.feature_sizes_[pair[1]]
             
             # Get all pairs of indices for the pair
             # pairs is of shape (batch_size, 2)
@@ -708,7 +707,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
             offsets = self.embedding_offsets[self.pairs_list[pair_index]].to(self.device)
             pairs = pairs + offsets
             
-            if self.pair_kernel_size > 0 and self.pair_kernel_weight > 0 and not (self.cat_feat_mask[pair[0]] and self.cat_feat_mask[pair[1]]):
+            if self.pair_kernel_size > 0 and self.pair_kernel_weight > 0 and not (self.cat_feat_mask_[pair[0]] and self.cat_feat_mask_[pair[1]]):
             
                 # Pairs will now be shape (batch_size, 2 * pair_kernel_size + 1, 2 * pair_kernel_size + 1, 2)
                 pairs = self._get_pairs_neighbors(pairs)
@@ -717,7 +716,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
                 # Will be shape (2 * pair_kernel_size + 1, 2 * pair_kernel_size + 1)
                 weights = self._get_pair_weights()
                 
-                pair_sizes = self.feature_sizes[self.pairs_list[pair_index]].to(self.device)
+                pair_sizes = self.feature_sizes_[self.pairs_list[pair_index]].to(self.device)
                 
                 # weights is now (batch_size, 2 * pair_kernel_size + 1, 2 * pair_kernel_size + 1)
                 weights = torch.where(
@@ -727,7 +726,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
                     weights
                 )
                 
-                if self.cat_feat_mask[pair[0]] and not self.cat_feat_mask[pair[1]]:
+                if self.cat_feat_mask_[pair[0]] and not self.cat_feat_mask_[pair[1]]:
                     weights = weights[:, :, self.pair_kernel_size] # (batch_size, 2*pair_kernel_size + 1)
                     pairs = pairs[:, :, self.pair_kernel_size, :] # (batch_size, 2*pair_kernel_size + 1, 2)
                     
@@ -739,7 +738,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
                         pairs * weights.unsqueeze(-1).unsqueeze(-1), 
                         dim=1
                     )
-                elif not self.cat_feat_mask[pair[0]] and self.cat_feat_mask[pair[1]]:
+                elif not self.cat_feat_mask_[pair[0]] and self.cat_feat_mask_[pair[1]]:
                     weights = weights[:, self.pair_kernel_size, :]
                     pairs = pairs[:, self.pair_kernel_size, :, :]
                     
@@ -910,7 +909,7 @@ class _BaseSingleSplitDNAMiteModel(nn.Module, LoggingMixin):
 
         return best_test_loss
 
-class BaseDNAMiteModel(nn.Module, LoggingMixin):
+class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
     """
     BaseDNAMiteModel is the parent class for DNAMite models.
 
@@ -986,7 +985,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                  verbosity=0,
                  random_state=None,
     ):
-        nn.Module.__init__(self)
         LoggingMixin.__init__(self, verbosity=verbosity)
         self.n_embed = n_embed
         self.n_hidden = n_hidden
@@ -1008,8 +1006,6 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         self.num_pairs = num_pairs
         self.verbosity = verbosity
         self.random_state = random_state if random_state is not None else np.random.randint(0, 1000)
-        
-        self.models = nn.ModuleList()
         self.fit_pairs = self.num_pairs > 0
         
         
@@ -1021,18 +1017,18 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
     
     def _infer_data_types(self, X):
         
-        self.feature_dtypes = []
+        self.feature_dtypes_ = []
         for i in range(X.shape[1]):
             if set(X.iloc[:, i].unique()).issubset({0, 1}):
-                self.feature_dtypes.append('binary')
+                self.feature_dtypes_.append('binary')
             elif X.iloc[:, i].dtype.name == 'category' or \
                 X.iloc[:, i].dtype.name == 'object':
-                self.feature_dtypes.append('categorical')
+                self.feature_dtypes_.append('categorical')
             else:
-                self.feature_dtypes.append('continuous')
+                self.feature_dtypes_.append('continuous')
                 
-        self.cat_feat_mask = np.array(self.feature_dtypes) != 'continuous'
-        self.cat_feat_mask = torch.tensor(self.cat_feat_mask).to(self.device)
+        self.cat_feat_mask_ = np.array(self.feature_dtypes_) != 'continuous'
+        self.cat_feat_mask_ = torch.tensor(self.cat_feat_mask_).to(self.device)
     
     def _discretize_data(self, X):
         X_discrete = X.copy()
@@ -1048,13 +1044,13 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         # If feature_bins is already set, use existing bins
         if hasattr(self, 'feature_bins'):
             for i in range(self.n_features):
-                if self.feature_dtypes[i] == 'continuous':
-                    X_discrete[:, i], _ = discretize(np.ascontiguousarray(X_discrete[:, i]), max_bins=self.max_bins, bins=self.feature_bins[i])
-                elif self.feature_dtypes[i] == 'binary':
-                    ordinal_map = {val: float(j) for j, val in enumerate(self.feature_bins[i])}
+                if self.feature_dtypes_[i] == 'continuous':
+                    X_discrete[:, i], _ = discretize(np.ascontiguousarray(X_discrete[:, i]), max_bins=self.max_bins, bins=self.feature_bins_[i])
+                elif self.feature_dtypes_[i] == 'binary':
+                    ordinal_map = {val: float(j) for j, val in enumerate(self.feature_bins_[i])}
                     X_discrete[:, i] = np.vectorize(ordinal_map.get)(X_discrete[:, i].astype(float))
                 else:
-                    ordinal_map = {val: float(j) for j, val in enumerate(self.feature_bins[i])}
+                    ordinal_map = {val: float(j) for j, val in enumerate(self.feature_bins_[i])}
                     
                     # Replace the NAs because they are handled incorrectly in dict
                     X_discrete[:, i] = np.where(X_discrete[:, i] == X_discrete[:, i], X_discrete[:, i], "NA")
@@ -1064,35 +1060,34 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                         if val not in ordinal_map:
                             # This means that the category was either not seen in training
                             # Or was an infrequent category
-                            if self.feature_bins[i][-1] == "Other":
-                                ordinal_map[val] = self.feature_sizes[i] - 1.0
+                            if self.feature_bins_[i][-1] == "Other":
+                                ordinal_map[val] = self.feature_sizes_[i] - 1.0
                             else:
                                 ordinal_map[val] = 0.0
                     X_discrete[:, i] = np.vectorize(ordinal_map.get)(X_discrete[:, i])
                 
         else:
-            self.feature_bins = []
-            self.feature_sizes = []
-            self.has_missing_bin = [] # different than cat_feat_mask because cat feats can have missing values
-            self.has_missing_values = [] # different than has_missing_bin because continuous features always have missing bin (to make kernel work correctly)
+            self.feature_bins_ = []
+            self.feature_sizes_ = []
+            self.has_missing_bin_ = [] # different than cat_feat_mask because cat feats can have missing values
+            self.has_missing_values_ = [] # different than has_missing_bin because continuous features always have missing bin (to make kernel work correctly)
             self.logger.debug("Discretizing features...")
-            from time import time
             for i in range(self.n_features):
-                if self.feature_dtypes[i] == 'continuous':
+                if self.feature_dtypes_[i] == 'continuous':
                     if pd.Series(X_discrete[:, i]).isna().sum() > 0:
-                        self.has_missing_values.append(True)
+                        self.has_missing_values_.append(True)
                     else:
-                        self.has_missing_values.append(False)
+                        self.has_missing_values_.append(False)
                     X_discrete[:, i], bins = discretize(
                         np.ascontiguousarray(X_discrete[:, i]), 
                         max_bins=self.max_bins, 
                         min_samples_per_bin=self.min_samples_per_bin
                     )
-                    self.has_missing_bin.append(True)
-                elif self.feature_dtypes[i] == 'binary':
+                    self.has_missing_bin_.append(True)
+                elif self.feature_dtypes_[i] == 'binary':
                     bins = [0, 1]
-                    self.has_missing_bin.append(False)
-                    self.has_missing_values.append(False)
+                    self.has_missing_bin_.append(False)
+                    self.has_missing_values_.append(False)
                 else:
                     # Ordinal encoder and force missing/unknown value to be 0
                     ordinal_encoder = OrdinalEncoder(
@@ -1113,21 +1108,21 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                         # offset and add np.nan to bins
                         X_discrete[:, i] += 1.0
                         bins = [np.nan] + [c for c in ordinal_encoder.categories_[0] if c is not None and c == c and c not in infrequent_categories]
-                        self.has_missing_bin.append(True)
-                        self.has_missing_values.append(True)
+                        self.has_missing_bin_.append(True)
+                        self.has_missing_values_.append(True)
                     else:
                         bins = [c for c in ordinal_encoder.categories_[0] if c is not None and c == c and c not in infrequent_categories]
-                        self.has_missing_bin.append(False)
-                        self.has_missing_values.append(False)
+                        self.has_missing_bin_.append(False)
+                        self.has_missing_values_.append(False)
                         
                     if len(infrequent_categories) > 0:
                         bins.append("Other")
                 
-                self.feature_bins.append(bins)
+                self.feature_bins_.append(bins)
                 
                 # Number of bins is (maximum bin index) + 1 (accounting for missing bin)
-                self.feature_sizes.append(int(X_discrete[:, i].max() + 1))
-                # self.feature_sizes.append(len(bins))
+                self.feature_sizes_.append(int(X_discrete[:, i].max() + 1))
+                # self.feature_sizes_.append(len(bins))
             
         if hasattr(X, 'columns'):
             X_discrete = pd.DataFrame(X_discrete, columns=col_names, dtype=float)
@@ -1136,14 +1131,14 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
     
     def _compute_bin_scores(self, ignore_missing_bin_in_intercept=True):
         
-        # has_missing_bins = [bins[0] != bins[0] if len(bins) > 0 else True for bins in self.feature_bins]
+        # has_missing_bins = [bins[0] != bins[0] if len(bins) > 0 else True for bins in self.feature_bins_]
         
         for model in self.models:
         
             model.compute_intercept(
                 model.bin_counts, 
                 ignore_missing_bin=ignore_missing_bin_in_intercept,
-                has_missing_bin=self.has_missing_bin
+                has_missing_bin=self.has_missing_bin_
             )
             
             model.bin_scores = []
@@ -1189,8 +1184,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         # If selected_feats is set, only use those features
         if hasattr(self, 'selected_feats'):
             self.logger.debug("Found selected features. Using only those features.")
-            X_train = X_train[self.selected_feats]
-            X_val = X_val[self.selected_feats]
+            X_train = X_train[self.selected_feats_]
+            X_val = X_val[self.selected_feats_]
             
             if self.fit_pairs:
                 pairs_list = [
@@ -1199,14 +1194,14 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             else:
                 pairs_list = None
                 
-            feature_sizes = [self.feature_sizes[self.feature_names_in_.get_loc(feat)] for feat in self.selected_feats]
-            cat_feat_mask = self.cat_feat_mask[self.feature_names_in_.get_indexer(self.selected_feats)]
-            monotone_constraints = None if self.monotone_constraints is None else [self.monotone_constraints[self.feature_names_in_.get_loc(feat)] for feat in self.selected_feats]
+            feature_sizes = [self.feature_sizes_[self.feature_names_in_.get_loc(feat)] for feat in self.selected_feats_]
+            cat_feat_mask = self.cat_feat_mask_[self.feature_names_in_.get_indexer(self.selected_feats_)]
+            monotone_constraints = None if self.monotone_constraints is None else [self.monotone_constraints[self.feature_names_in_.get_loc(feat)] for feat in self.selected_feats_]
 
         else:
             pairs_list = self.pairs_list
-            feature_sizes = self.feature_sizes
-            cat_feat_mask = self.cat_feat_mask
+            feature_sizes = self.feature_sizes_
+            cat_feat_mask = self.cat_feat_mask_
             monotone_constraints = self.monotone_constraints
             
         if partialed_feats is not None:
@@ -1276,16 +1271,16 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         )
         
         if hasattr(self, 'selected_feats'):
-            model.feature_bins = [self.feature_bins[self.feature_names_in_.get_loc(feat)] for feat in self.selected_feats]
+            model.feature_bins = [self.feature_bins_[self.feature_names_in_.get_loc(feat)] for feat in self.selected_feats_]
             model.bin_counts = [
                 get_bin_counts(X_train[col], nb) for col, nb in zip(X_train.columns, feature_sizes)
             ]
         else:
-            model.feature_bins = self.feature_bins
+            model.feature_bins = self.feature_bins_
                 
             # Compute the bin counts
             model.bin_counts = [
-                get_bin_counts(X_train[col], nb) for col, nb in zip(X_train.columns, self.feature_sizes)
+                get_bin_counts(X_train[col], nb) for col, nb in zip(X_train.columns, self.feature_sizes_)
             ]
         
         if not self.fit_pairs:
@@ -1436,7 +1431,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             model = _BaseSingleSplitDNAMiteModel(
                 n_features=self.n_features, 
                 n_output=self.n_output,
-                feature_sizes=self.feature_sizes, 
+                feature_sizes=self.feature_sizes_, 
                 n_embed=self.n_embed,
                 n_hidden=self.n_hidden, 
                 n_layers=self.n_layers,
@@ -1450,7 +1445,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                 kernel_weight=self.kernel_weight,
                 pair_kernel_size=self.pair_kernel_size,
                 pair_kernel_weight=self.pair_kernel_weight,
-                cat_feat_mask=self.cat_feat_mask,
+                cat_feat_mask=self.cat_feat_mask_,
                 monotone_constraints=self.monotone_constraints,
                 verbosity=self.verbosity
             ).to(self.device)
@@ -1509,7 +1504,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         
         if not self.fit_pairs:
-            self.selected_feats = self.feature_names_in_[model.active_feats.cpu().numpy()].tolist()
+            self.selected_feats_ = self.feature_names_in_[model.active_feats.cpu().numpy()].tolist()
             val_score = self._score(pd.DataFrame(X_val, columns=self.feature_names_in_), y_val, y_train, model=model)
             # val_score = {"Test": 0}
             return best_val_loss, val_score, model
@@ -1550,7 +1545,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         # val_score = self.score(pd.DataFrame(X_val, columns=self.feature_names_in_), y_val, y_train, model=model)
         val_score = {}
         
-        self.selected_feats = self.feature_names_in_[model.active_feats.cpu().numpy()].tolist()
+        self.selected_feats_ = self.feature_names_in_[model.active_feats.cpu().numpy()].tolist()
         self.selected_pairs = [
             [self.feature_names_in_[pair[0]], self.feature_names_in_[pair[1]]]
             for pair in model.pairs_list[model.active_pairs].cpu().numpy()
@@ -1588,20 +1583,20 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             
             # best_val_loss, model = self._select_features(X, y, partialed_feats=partialed_feats, model=model)
             best_val_loss, val_score, _ = self._select_features(X, y, partialed_feats=partialed_feats)
-            n_feat_selected = len(self.selected_feats)
+            n_feat_selected = len(self.selected_feats_)
             num_feats.append(n_feat_selected)
             losses.append(best_val_loss)
-            feats[n_feat_selected] = self.selected_feats
+            feats[n_feat_selected] = self.selected_feats_
             scores.append(list(val_score.values())[0])
             
             self.logger.debug(f"Number of features selected: {n_feat_selected}")
-            self.logger.debug(f"Selected features: {self.selected_feats}")
+            self.logger.debug(f"Selected features: {self.selected_feats_}")
             self.logger.debug(f"Validation loss: {best_val_loss}")
             self.logger.debug(f"Validation score: {val_score}")
             
             # model.reg_param = model.reg_param * 2
             self.reg_param = self.reg_param * 2
-            del self.selected_feats
+            del self.selected_feats_
             
         self.fit_pairs = original_fit_pairs
         
@@ -1735,7 +1730,11 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         """
         self.logger.debug("STARTING FIT...")
         
-        if isinstance(X, np.ndarray):
+        # Check that X and y are the same length
+        if len(X) != len(y):
+            raise ValueError("X and y must have the same number of samples.")
+        
+        if not isinstance(X, pd.DataFrame):
             raise ValueError("Input data must be a pandas DataFrame.")
         
         if hasattr(self, "feature_names_in_"):
@@ -1763,6 +1762,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         # First discretize the data
         X_discrete = self._discretize_data(X)
         
+        self.models = []
+        
         # Fit several models, one for each validation split
         for i in range(self.n_val_splits):
             self.logger.info(f"SPlIT: {i}")
@@ -1777,14 +1778,14 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             
         self._compute_bin_scores()
             
-        return
+        return self
     
     def _predict(self, X_test_discrete, models):
         self.logger.debug("STARTING _PREDICT...")
         
         # # If selected_feats is set, only use those features
         # if hasattr(self, 'selected_feats'):
-        #     X_test_discrete = X_test_discrete[self.selected_feats]
+        #     X_test_discrete = X_test_discrete[self.selected_feats_]
         
         if hasattr(self, 'selected_feats'):
             if self.fit_pairs:
@@ -1833,12 +1834,15 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         if hasattr(self, "feature_names_in_"):
             if not all(X_test.columns == self.feature_names_in_):
                 raise ValueError("Input data columns do not match saved feature names.")
+            
+        if not hasattr(self, 'models'):
+            raise ValueError("Model has not been fitted yet. Please fit the model before predicting.")
         
         X_test_discrete = self._discretize_data(X_test)
                 
-        if hasattr(self, 'selected_feats'):
+        if hasattr(self, 'selected_feats_'):
             self.logger.debug("Found selected features. Using only those features.")
-            X_test_discrete = X_test_discrete[self.selected_feats]
+            X_test_discrete = X_test_discrete[self.selected_feats_]
         
         return self._predict(X_test_discrete, self.models)
     
@@ -1871,13 +1875,13 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                 feat_bin_scores = model.bin_scores[i].squeeze()
                 bin_counts = model.bin_counts[i]
                 feat_idx = self.feature_names_in_.get_loc(col)
-                missing_bin_count = bin_counts[0] if self.has_missing_bin[feat_idx] else 0
+                missing_bin_count = bin_counts[0] if self.has_missing_bin_[feat_idx] else 0
                 
-                if missing_bin != "include" and self.has_missing_bin[feat_idx]:
+                if missing_bin != "include" and self.has_missing_bin_[feat_idx]:
                     missing_bin_score = feat_bin_scores[0]
                     feat_bin_scores = feat_bin_scores[1:]
                     bin_counts = bin_counts[1:]
-                if missing_bin == "ignore" and not self.has_missing_values[feat_idx]:
+                if missing_bin == "ignore" and not self.has_missing_values_[feat_idx]:
                     feat_bin_scores = feat_bin_scores[1:]
                     bin_counts = bin_counts[1:]
                 
@@ -1885,7 +1889,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                 
                 if missing_bin == "stratify":
                     importances.append([split, col, feat_importance, "observed", len(feat_bin_scores)])
-                    if self.has_missing_values[feat_idx]:
+                    if self.has_missing_values_[feat_idx]:
                         if missing_bin_count == 0:
                             raise ValueError(f"Tried to compute a missing bin feature score for a feature without a missing bin.")
                         missing_importance = np.abs(missing_bin_score)
@@ -2023,8 +2027,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             A DataFrame containing the bin scores for the feature.
         """
         
-        is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
-        has_missing_values = self.has_missing_values[self.feature_names_in_.get_loc(feature_name)]
+        is_cat_col = self.feature_dtypes_[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
+        has_missing_values = self.has_missing_values_[self.feature_names_in_.get_loc(feature_name)]
         
         dfs = []
         for i, model in enumerate(self.models):
@@ -2094,8 +2098,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         if isinstance(feature_names, str):
             feature_names = [feature_names]
             
-        is_cat_cols = [self.feature_dtypes[self.feature_names_in_.get_loc(f)] != 'continuous' for f in feature_names]
-        has_missing_values = [self.has_missing_values[self.feature_names_in_.get_loc(f)] for f in feature_names]
+        is_cat_cols = [self.feature_dtypes_[self.feature_names_in_.get_loc(f)] != 'continuous' for f in feature_names]
+        has_missing_values = [self.has_missing_values_[self.feature_names_in_.get_loc(f)] for f in feature_names]
 
         num_main_plots = len(feature_names)
         num_missing_bin_plots = sum([1 if not c and m and plot_missing_bin else 0 for c, m in zip(is_cat_cols, has_missing_values)])
@@ -2125,8 +2129,8 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
 
         for feature_name in feature_names:
             shape_data = self.get_shape_function(feature_name)
-            is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
-            has_missing_values = self.has_missing_values[self.feature_names_in_.get_loc(feature_name)]
+            is_cat_col = self.feature_dtypes_[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
+            has_missing_values = self.has_missing_values_[self.feature_names_in_.get_loc(feature_name)]
             
             if not is_cat_col:
                 if not plot_missing_bin or not has_missing_values:
@@ -2235,18 +2239,18 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
             
             # Remove scores associated with missing bins
             grid = self._make_grid(
-                np.arange(0, self.feature_sizes[col1_index]), 
-                np.arange(0, self.feature_sizes[col2_index])
+                np.arange(0, self.feature_sizes_[col1_index]), 
+                np.arange(0, self.feature_sizes_[col2_index])
             )
-            if self.has_missing_bin[col1_index] and not self.has_missing_bin[col2_index]:
+            if self.has_missing_bin_[col1_index] and not self.has_missing_bin_[col2_index]:
                 pair_bin_scores = pair_bin_scores[grid[:, 0] > 0]
-            elif not self.has_missing_bin[col1_index] and self.has_missing_bin[col2_index]:
+            elif not self.has_missing_bin_[col1_index] and self.has_missing_bin_[col2_index]:
                 pair_bin_scores = pair_bin_scores[grid[:, 1] > 0]
             else:
                 pair_bin_scores = pair_bin_scores[grid.prod(axis=1) > 0]
             
             # Get bin values
-            if self.feature_dtypes[col1_index] != 'continuous':
+            if self.feature_dtypes_[col1_index] != 'continuous':
                 # feat1_bin_values = np.arange(-1, len(model.feature_bins[col1_index])+1)
                 feat1_bin_values = model.feature_bins[col1_index]
             else:
@@ -2255,7 +2259,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
                     model.feature_bins[col1_index]
                 ])
                 
-            if self.feature_dtypes[col2_index] != 'continuous':
+            if self.feature_dtypes_[col2_index] != 'continuous':
                 # feat2_bin_values = np.arange(-1, len(model.feature_bins[col2_index])+1)
                 feat2_bin_values = model.feature_bins[col2_index]
             else:
@@ -2318,7 +2322,7 @@ class BaseDNAMiteModel(nn.Module, LoggingMixin):
         
         plt.tight_layout()
       
-class DNAMiteRegressor(BaseDNAMiteModel):
+class DNAMiteRegressor(RegressorMixin, BaseDNAMiteModel):
     """
     DNAMiteRegressor is a model for regression using the DNAMite architecture.
 
@@ -2810,7 +2814,7 @@ class DNAMiteRegressor(BaseDNAMiteModel):
         return super().get_regularization_path(X, y, init_reg_param, partialed_feats=partialed_feats)
     
 
-class DNAMiteBinaryClassifier(BaseDNAMiteModel):
+class DNAMiteBinaryClassifier(ClassifierMixin, BaseDNAMiteModel):
     """
     DNAMiteClassifier is a model for binary classification using the DNAMite architecture.
 
@@ -3275,7 +3279,6 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
         
         y = self.label_encoder.transform(y)
         
-        from sklearn.metrics import roc_auc_score
         preds = self._predict(X, models=[model])
         preds = 1 / (1 + np.exp(-preds))
         
@@ -3309,6 +3312,24 @@ class DNAMiteBinaryClassifier(BaseDNAMiteModel):
             y = self.label_encoder.transform(y)
         
         return super().get_regularization_path(X, y, init_reg_param, partialed_feats=partialed_feats)
+    
+    def score(self, X, y):
+        """
+        Return the mean accuracy on the given test data and labels.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Test samples.
+        y : array-like of shape (n_samples,)
+            True labels for X.
+
+        Returns
+        -------
+        score : float
+            The AUC score.
+        """
+        return roc_auc_score(y, self.predict_proba(X))
     
 
 class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
@@ -3587,7 +3608,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
     
     def get_shape_function(self, feature_name, label_id):
         
-        is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
+        is_cat_col = self.feature_dtypes_[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
         
         dfs = []
         for i, model in enumerate(self.models):
@@ -3897,6 +3918,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             random_state=random_state
         )
         
+        self.n_eval_times = n_eval_times
         self.censor_estimator = censor_estimator
         assert self.censor_estimator in ["km", "cox"], "censor_estimator must be 'km' or 'cox'"
         
@@ -4360,13 +4382,13 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                 feat_bin_scores = model.bin_scores[i]
                 bin_counts = model.bin_counts[i]
                 feat_idx = self.feature_names_in_.get_loc(col)
-                missing_bin_count = bin_counts[0] if self.has_missing_bin[feat_idx] else 0
+                missing_bin_count = bin_counts[0] if self.has_missing_bin_[feat_idx] else 0
                 
-                if missing_bin != "include" and self.has_missing_bin[feat_idx]:
+                if missing_bin != "include" and self.has_missing_bin_[feat_idx]:
                     missing_bin_score = feat_bin_scores[0]
                     feat_bin_scores = feat_bin_scores[1:]
                     bin_counts = bin_counts[1:]
-                if missing_bin == "ignore" and not self.has_missing_values[feat_idx]:
+                if missing_bin == "ignore" and not self.has_missing_values_[feat_idx]:
                     feat_bin_scores = feat_bin_scores[1:]
                     bin_counts = bin_counts[1:]
                 
@@ -4378,7 +4400,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                     
                 if missing_bin == "stratify":
                     importances.append([split, col, feat_importance, "observed", len(feat_bin_scores)])
-                    if self.has_missing_values[feat_idx]:
+                    if self.has_missing_values_[feat_idx]:
                         if missing_bin_count == 0:
                             raise ValueError(f"Tried to compute a missing bin feature score for a feature without a missing bin.")
                         
@@ -4515,8 +4537,8 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         pandas.DataFrame
             A DataFrame containing the bin scores for the feature.
         """
-        is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
-        has_missing_values = self.has_missing_values[self.feature_names_in_.get_loc(feature_name)]
+        is_cat_col = self.feature_dtypes_[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
+        has_missing_values = self.has_missing_values_[self.feature_names_in_.get_loc(feature_name)]
         
         eval_index = np.searchsorted(self.eval_times.cpu().numpy(), eval_time)
         
@@ -4587,8 +4609,8 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         if not isinstance(eval_times, list):
             eval_times = [eval_times]
             
-        is_cat_cols = [self.feature_dtypes[self.feature_names_in_.get_loc(f)] != 'continuous' for f in feature_names]
-        has_missing_values = [self.has_missing_values[self.feature_names_in_.get_loc(f)] for f in feature_names]
+        is_cat_cols = [self.feature_dtypes_[self.feature_names_in_.get_loc(f)] != 'continuous' for f in feature_names]
+        has_missing_values = [self.has_missing_values_[self.feature_names_in_.get_loc(f)] for f in feature_names]
         
         num_main_plots = len(feature_names)
         num_missing_bin_plots = sum([1 if not c and m and plot_missing_bin else 0 for c, m in zip(is_cat_cols, has_missing_values)])
@@ -4669,8 +4691,8 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             
             for feature_name in feature_names:
                 
-                is_cat_col = self.feature_dtypes[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
-                has_missing_values = self.has_missing_values[self.feature_names_in_.get_loc(feature_name)]
+                is_cat_col = self.feature_dtypes_[self.feature_names_in_.get_loc(feature_name)] != 'continuous'
+                has_missing_values = self.has_missing_values_[self.feature_names_in_.get_loc(feature_name)]
                 
                 shape_data = self.get_shape_function(feature_name, eval_time)
                 
@@ -4788,15 +4810,15 @@ class DNAMiteSurvival(BaseDNAMiteModel):
             # grid = self._make_grid(np.arange(0, feat1_nbins+2), np.arange(0, feat2_nbins+2))
             grid = self._make_grid(np.arange(0, feat1_nbins), np.arange(0, feat2_nbins))
             
-            if self.has_missing_bin[col1_index] and not self.has_missing_bin[col2_index]:
+            if self.has_missing_bin_[col1_index] and not self.has_missing_bin_[col2_index]:
                 pair_bin_scores = pair_bin_scores[grid[:, 0] > 0]
-            elif not self.has_missing_bin[col1_index] and self.has_missing_bin[col2_index]:
+            elif not self.has_missing_bin_[col1_index] and self.has_missing_bin_[col2_index]:
                 pair_bin_scores = pair_bin_scores[grid[:, 1] > 0]
             else:
                 pair_bin_scores = pair_bin_scores[grid.prod(axis=1) > 0]
             
             # Get bin values
-            if self.feature_dtypes[col1_index] != 'continuous':
+            if self.feature_dtypes_[col1_index] != 'continuous':
                 # feat1_bin_values = np.arange(-1, len(model.feature_bins[col1_index])+1)
                 feat1_bin_values = model.feature_bins[col1_index]
             else:
@@ -4805,7 +4827,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
                     model.feature_bins[col1_index]
                 ])
                 
-            if self.feature_dtypes[col2_index] != 'continuous':
+            if self.feature_dtypes_[col2_index] != 'continuous':
                 # feat2_bin_values = np.arange(-1, len(model.feature_bins[col2_index])+1)
                 feat2_bin_values = model.feature_bins[col2_index]
             else:
@@ -4932,7 +4954,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
         if hasattr(self, 'selected_feats'):
             self.logger.debug("Found selected features. Using only those features.")
-            X_test_discrete = X_test_discrete[self.selected_feats]
+            X_test_discrete = X_test_discrete[self.selected_feats_]
         
         return self._predict(X_test_discrete, self.models, pcw_obs_times_test)
     
