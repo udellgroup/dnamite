@@ -1033,16 +1033,15 @@ class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
     def _discretize_data(self, X):
         X_discrete = X.copy()
         
-        if not hasattr(self, 'feature_dtypes'):
+        if not hasattr(self, 'feature_dtypes_'):
             self._infer_data_types(X_discrete)
         
-        # If X is pandas, store column names
         if hasattr(X, 'columns'):
             col_names = X.columns
             X_discrete = X_discrete.values
         
         # If feature_bins is already set, use existing bins
-        if hasattr(self, 'feature_bins'):
+        if hasattr(self, 'feature_bins_'):
             for i in range(self.n_features):
                 if self.feature_dtypes_[i] == 'continuous':
                     X_discrete[:, i], _ = discretize(np.ascontiguousarray(X_discrete[:, i]), max_bins=self.max_bins, bins=self.feature_bins_[i])
@@ -1085,7 +1084,7 @@ class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
                     )
                     self.has_missing_bin_.append(True)
                 elif self.feature_dtypes_[i] == 'binary':
-                    bins = [0, 1]
+                    bins = np.array([0, 1])
                     self.has_missing_bin_.append(False)
                     self.has_missing_values_.append(False)
                 else:
@@ -1117,6 +1116,8 @@ class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
                         
                     if len(infrequent_categories) > 0:
                         bins.append("Other")
+                        
+                    bins = np.array(bins)
                 
                 self.feature_bins_.append(bins)
                 
@@ -1182,14 +1183,14 @@ class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
             np.random.seed(random_state)
         
         # If selected_feats is set, only use those features
-        if hasattr(self, 'selected_feats'):
+        if hasattr(self, 'selected_feats_'):
             self.logger.debug("Found selected features. Using only those features.")
             X_train = X_train[self.selected_feats_]
             X_val = X_val[self.selected_feats_]
             
             if self.fit_pairs:
                 pairs_list = [
-                    [X_train.columns.get_loc(feat1), X_train.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs
+                    [X_train.columns.get_loc(feat1), X_train.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs_
                 ]
             else:
                 pairs_list = None
@@ -1270,7 +1271,7 @@ class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
             mains=True,
         )
         
-        if hasattr(self, 'selected_feats'):
+        if hasattr(self, 'selected_feats_'):
             model.feature_bins = [self.feature_bins_[self.feature_names_in_.get_loc(feat)] for feat in self.selected_feats_]
             model.bin_counts = [
                 get_bin_counts(X_train[col], nb) for col, nb in zip(X_train.columns, feature_sizes)
@@ -1342,8 +1343,8 @@ class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
         entropy_param=0, 
     ):
         """
-        Perform feature selection. Selected features and pairs will be stored in model.selected_feats
-        and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
+        Perform feature selection. Selected features and pairs will be stored in model.selected_feats_
+        and model.selected_pairs_, respectively. Should be called before fit if feature selection is desired.
         
         Parameters
         ----------
@@ -1546,13 +1547,13 @@ class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
         val_score = {}
         
         self.selected_feats_ = self.feature_names_in_[model.active_feats.cpu().numpy()].tolist()
-        self.selected_pairs = [
+        self.selected_pairs_ = [
             [self.feature_names_in_[pair[0]], self.feature_names_in_[pair[1]]]
             for pair in model.pairs_list[model.active_pairs].cpu().numpy()
         ]
         self.pairs_list = [selected_pair_indices[i] for i in model.active_pairs.cpu().numpy()]
         
-        self.logger.info(f"Number of interaction features selected: {len(self.selected_pairs)}")
+        self.logger.info(f"Number of interaction features selected: {len(self.selected_pairs_)}")
         
         return best_val_loss, val_score, model
     
@@ -1650,7 +1651,7 @@ class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
         
         self.pairs_list = [pairs_list[i] for i in top_pairs]
         
-        self.selected_pairs = [
+        self.selected_pairs_ = [
             [self.feature_names_in_[pair[0]], self.feature_names_in_[pair[1]]]
             for pair in self.pairs_list
         ]
@@ -1741,8 +1742,8 @@ class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
             if not all(X.columns == self.feature_names_in_):
                 raise ValueError("Input data columns do not match saved feature names.")
         
-        if hasattr(self, 'selected_feats'):
-            if hasattr(self, 'selected_pairs') and self.fit_pairs:
+        if hasattr(self, 'selected_feats_'):
+            if hasattr(self, 'selected_pairs_') and self.fit_pairs:
                 self.logger.warning("Found selected features and pairs. Using only those features and pairs.")
             else:
                 self.logger.warning("Found selected features. Using only those features.")
@@ -1787,10 +1788,10 @@ class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
         # if hasattr(self, 'selected_feats'):
         #     X_test_discrete = X_test_discrete[self.selected_feats_]
         
-        if hasattr(self, 'selected_feats'):
+        if hasattr(self, 'selected_feats_'):
             if self.fit_pairs:
                 pairs_list = [
-                    [X_test_discrete.columns.get_loc(feat1), X_test_discrete.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs
+                    [X_test_discrete.columns.get_loc(feat1), X_test_discrete.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs_
                 ]    
         elif self.fit_pairs:
             pairs_list = self.pairs_list
@@ -2251,8 +2252,10 @@ class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
             
             # Get bin values
             if self.feature_dtypes_[col1_index] != 'continuous':
-                # feat1_bin_values = np.arange(-1, len(model.feature_bins[col1_index])+1)
-                feat1_bin_values = model.feature_bins[col1_index]
+                if self.has_missing_bin_[col1_index]:
+                    feat1_bin_values = model.feature_bins[col1_index][1:]
+                else:
+                    feat1_bin_values = model.feature_bins[col1_index]
             else:
                 feat1_bin_values = np.concatenate([
                     [model.feature_bins[col1_index].min() - 0.01],
@@ -2260,8 +2263,10 @@ class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
                 ])
                 
             if self.feature_dtypes_[col2_index] != 'continuous':
-                # feat2_bin_values = np.arange(-1, len(model.feature_bins[col2_index])+1)
-                feat2_bin_values = model.feature_bins[col2_index]
+                if self.has_missing_bin_[col2_index]:
+                    feat2_bin_values = model.feature_bins[col2_index][1:]
+                else:
+                    feat2_bin_values = model.feature_bins[col2_index]
             else:
                 feat2_bin_values = np.concatenate([
                     [model.feature_bins[col2_index].min() - 0.01],
@@ -2292,8 +2297,10 @@ class BaseDNAMiteModel(BaseEstimator, LoggingMixin):
 
         # Round the values in the columns and index
         # Round the index and columns to 3 decimal places and reassign
-        pair_data_dnamite.index = pair_data_dnamite.index.to_series().round(3)
-        pair_data_dnamite.columns = pair_data_dnamite.columns.to_series().round(3)
+        if self.feature_dtypes_[col1_index] == 'continuous':
+            pair_data_dnamite.index = pair_data_dnamite.index.to_series().astype(float).round(3)
+        if self.feature_dtypes_[col2_index] == 'continuous':
+            pair_data_dnamite.columns = pair_data_dnamite.columns.to_series().astype(float).round(3)
         
         return pair_data_dnamite
     
@@ -2332,6 +2339,8 @@ class DNAMiteRegressor(RegressorMixin, BaseDNAMiteModel):
         The size of the embedding layer.
     n_hidden : int, optional (default=32)
         The number of hidden units in the hidden layers.
+    n_layers : int, default=2
+        Number of hidden layers in the model.
     max_bins : int, optional (default=32)
         The maximum number of bins for discretizing continuous features.
     min_samples_per_bin : int, default=None
@@ -2373,6 +2382,7 @@ class DNAMiteRegressor(RegressorMixin, BaseDNAMiteModel):
     def __init__(self,
                  n_embed=32, 
                  n_hidden=32, 
+                 n_layers=2,
                  max_bins=32, 
                  min_samples_per_bin=None,
                  validation_size=0.2, 
@@ -2393,6 +2403,7 @@ class DNAMiteRegressor(RegressorMixin, BaseDNAMiteModel):
         super().__init__(
             n_embed=n_embed,
             n_hidden=n_hidden,
+            n_layers=n_layers,
             n_output=1,
             max_bins=max_bins,
             min_samples_per_bin=min_samples_per_bin,
@@ -2723,8 +2734,8 @@ class DNAMiteRegressor(RegressorMixin, BaseDNAMiteModel):
         entropy_param=0, 
     ):
         """
-        Perform feature selection. Selected features and pairs will be stored in model.selected_feats
-        and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
+        Perform feature selection. Selected features and pairs will be stored in model.selected_feats_
+        and model.selected_pairs_, respectively. Should be called before fit if feature selection is desired.
         
         Parameters
         ----------
@@ -2824,6 +2835,8 @@ class DNAMiteBinaryClassifier(ClassifierMixin, BaseDNAMiteModel):
         The size of the embedding layer.
     n_hidden : int, optional (default=32)
         The number of hidden units in the hidden layers.
+    n_layers : int, default=2
+        Number of hidden layers in the model.
     max_bins : int, optional (default=32)
         The maximum number of bins for discretizing continuous features.
     min_samples_per_bin : int, default=None
@@ -2866,6 +2879,7 @@ class DNAMiteBinaryClassifier(ClassifierMixin, BaseDNAMiteModel):
     def __init__(self,
                  n_embed=32, 
                  n_hidden=32, 
+                 n_layers=2,
                  max_bins=32, 
                  min_samples_per_bin=None,
                  validation_size=0.2, 
@@ -2886,6 +2900,7 @@ class DNAMiteBinaryClassifier(ClassifierMixin, BaseDNAMiteModel):
         super().__init__(
             n_embed=n_embed,
             n_hidden=n_hidden,
+            n_layers=n_layers,
             n_output=1,
             max_bins=max_bins,
             min_samples_per_bin=min_samples_per_bin,
@@ -3228,8 +3243,8 @@ class DNAMiteBinaryClassifier(ClassifierMixin, BaseDNAMiteModel):
         entropy_param=0, 
     ):
         """
-        Perform feature selection. Selected features and pairs will be stored in model.selected_feats
-        and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
+        Perform feature selection. Selected features and pairs will be stored in model.selected_feats_
+        and model.selected_pairs_, respectively. Should be called before fit if feature selection is desired.
         
         Parameters
         ----------
@@ -3346,6 +3361,8 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         The size of the embedding layer.
     n_hidden : int, optional (default=32)
         The number of hidden units in the hidden layers.
+    n_layers : int, default=2
+        Number of hidden layers in the model.
     max_bins : int, optional (default=32)
         The maximum number of bins for discretizing continuous features.
     min_samples_per_bin : int, default=None
@@ -3389,6 +3406,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
                  n_classes, 
                  n_embed=32, 
                  n_hidden=32, 
+                 n_layers=2,
                  max_bins=32, 
                  min_samples_per_bin=None,
                  validation_size=0.2, 
@@ -3410,6 +3428,7 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
             n_features=n_features,
             n_embed=n_embed,
             n_hidden=n_hidden,
+            n_layers=n_layers,
             n_output=n_classes,
             max_bins=max_bins,
             min_samples_per_bin=min_samples_per_bin,
@@ -3770,8 +3789,8 @@ class DNAMiteMulticlassClassifier(BaseDNAMiteModel):
         entropy_param=0, 
     ):
         """
-        Perform feature selection. Selected features and pairs will be stored in model.selected_feats
-        and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
+        Perform feature selection. Selected features and pairs will be stored in model.selected_feats_
+        and model.selected_pairs_, respectively. Should be called before fit if feature selection is desired.
         
         Parameters
         ----------
@@ -4200,8 +4219,8 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         entropy_param=0, 
     ):
         """
-        Perform feature selection. Selected features and pairs will be stored in model.selected_feats
-        and model.selected_pairs, respectively. Should be called before fit if feature selection is desired.
+        Perform feature selection. Selected features and pairs will be stored in model.selected_feats_
+        and model.selected_pairs_, respectively. Should be called before fit if feature selection is desired.
         
         Parameters
         ----------
@@ -4903,10 +4922,10 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         
     def _predict(self, X_test_discrete, models, pcw_obs_times_test):
         
-        if hasattr(self, 'selected_feats'):
+        if hasattr(self, 'selected_feats_'):
             if self.fit_pairs:
                 pairs_list = [
-                    [X_test_discrete.columns.get_loc(feat1), X_test_discrete.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs
+                    [X_test_discrete.columns.get_loc(feat1), X_test_discrete.columns.get_loc(feat2)] for feat1, feat2 in self.selected_pairs_
                 ]    
         elif self.fit_pairs:
             pairs_list = self.pairs_list
@@ -4952,7 +4971,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         pcw_obs_times_test = self._predict_censoring_distribution(np.zeros(X_test.shape[0]), X_test) + 1e-5
         X_test_discrete = self._discretize_data(X_test)
         
-        if hasattr(self, 'selected_feats'):
+        if hasattr(self, 'selected_feats_'):
             self.logger.debug("Found selected features. Using only those features.")
             X_test_discrete = X_test_discrete[self.selected_feats_]
         
