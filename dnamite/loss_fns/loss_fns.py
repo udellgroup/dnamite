@@ -9,8 +9,37 @@ def ipcw_rps_loss(
     times, 
     eval_times
 ):
-    """  
-    IPCW Loss
+    """
+    IPCW Loss function for survival analysis.
+    Alternative to the Cox loss that does not assume proportional hazards.
+    Requires CDF estimates at specified evaluation times.
+    For mathematical details, see Equation 6 in https://arxiv.org/pdf/2411.05923?.
+    
+    Parameters
+    ----------
+    cdf_preds : torch.Tensor
+        Predicted cumulative distribution function values at eval_times.
+        Shape: (N, T) where N is batch size and T is len(eval_times).
+    pcw_eval_times : torch.Tensor
+        Estimated probability of censoring at evaluation times.
+        Shape: (T)
+    pcw_obs_times : torch.Tensor
+        Estimated probability of censoring at observed times.
+        Shape: (N)
+    events : torch.Tensor
+        Event indicators, where 1 indicates event occurred and 0 indicates censored.
+        Shape: (N)
+    times : torch.Tensor
+        Observed event times.
+        Shape: (N)
+    eval_times : torch.Tensor
+        Evaluation times.
+        Shape: (T)
+        
+    Returns
+    -------
+    torch.Tensor
+        Computed IPCW loss.
     """
     
     # cdf_preds is of shape (N, T) where N is batch size and T is len(eval_times)
@@ -44,38 +73,24 @@ def ipcw_rps_loss(
     
     # return torch.sum(loss / divisor)
     return torch.mean(loss)
-
-def rps_loss(surv_preds, events, times, eval_times):
-    """  
-    RPS Loss
-    """
-    
-    # surv_preds is of shape (N, T)
-    # where N is batch size and T is number of evaluation times
-    # surv_preds(i, j) gives P(Ti > tj | Xi)
-    
-    uncensored_loss = torch.square(surv_preds - (eval_times < times.unsqueeze(-1)).float()).sum(axis=1)
-    censored_loss = (torch.square(surv_preds - 1) * (eval_times <= times.unsqueeze(-1)).float()).sum(axis=1)
-    
-    return torch.mean(events.float() * uncensored_loss + (1 - events.float()) * censored_loss)
-
-# Loss taken from Eq 1 of https://dl.acm.org/doi/pdf/10.1145/3534678.3539259
-# Can't just use MSE loss because pseudo-values not strictly in [0, 1]
-def pseudo_value_loss(
-    surv_preds,
-    pseudo_values
-):
-    """  
-    pseudo-value loss
-    """
-    
-    return torch.mean(
-        pseudo_values * (1 - 2*surv_preds) + torch.square(surv_preds), dim=0
-    ).sum()
     
 def coxph_loss(y_hat, events, times):
     """
-    CoxPH Loss
+    Cox Proportional Hazards loss function for survival analysis.
+    
+    Parameters
+    ----------
+    y_hat : torch.Tensor
+        Predicted log-risk scores. Shape: (N)
+    events : torch.Tensor
+        Event indicators, where 1 indicates event occurred and 0 indicates censored. Shape: (N)
+    times : torch.Tensor
+        Observed event times. Shape: (N)
+        
+    Returns
+    -------
+    torch.Tensor
+        Computed CoxPH loss.
     """
     
     # Sort y_hat and events by times
@@ -88,59 +103,3 @@ def coxph_loss(y_hat, events, times):
     
     
     return -1 * events.to(torch.float32) @ (y_hat - torch.log(e_sums))
-
-def bce_surv_loss(surv_preds, events, times, eval_times):
-    """
-    Binary Cross-Entropy Survival Loss
-    """
-    
-    # surv_preds is of shape (N, T)
-    # where N is batch size and T is number of evaluation times
-    # surv_preds(i, j) gives P(Ti > tj | Xi)
-    
-    # Maximize survival for all samples before their times
-    loss = torch.sum(
-        -1 * torch.log(surv_preds + 1e-5) * \
-        (eval_times < times.unsqueeze(-1)).float(),
-        axis=1
-    )
-    
-    # Minimize survival loss for all uncensored samples after their times
-    loss += torch.sum(
-        -1 * torch.log(1 - surv_preds + 1e-5) * \
-        torch.logical_and(
-            eval_times >= times.unsqueeze(-1),
-            events.unsqueeze(-1)
-        ).float(),
-        axis=1
-    )
-    
-    return torch.mean(loss)
-
-def drsa_loss(hazard_preds, events, times, eval_times):
-    """
-    DRSA-Loss
-    """
-    
-    # Find evaluation time for each event time
-    sample_eval_times = torch.clip(
-        torch.searchsorted(eval_times, times).unsqueeze(-1),
-        0,
-        len(eval_times)-1
-    )
-    
-    
-    # Get first part of loss
-    loss = -1 * events.unsqueeze(-1).float() * (
-        torch.log(hazard_preds + 1e-5).gather(1, sample_eval_times) + \
-        torch.sum(torch.log(1 - hazard_preds + 1e-5) * (eval_times < times.unsqueeze(-1)).float(), dim=1)
-    )
-    
-    # Get second part of loss
-    
-    surv_preds = torch.cumprod(1 - hazard_preds, dim=1)
-    
-    loss += -1 * (~events).float() * torch.log(surv_preds + 1e-5).gather(1, sample_eval_times)
-    loss += -1 * events.float() * torch.log(1 - surv_preds + 1e-5).gather(1, sample_eval_times)
-    
-    return loss.mean()
