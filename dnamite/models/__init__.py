@@ -3,7 +3,7 @@ from .dnamite import (
     # BaseDNAMiteModel,
     DNAMiteBinaryClassifier,
     DNAMiteRegressor,
-    DNAMiteMulticlassClassifier,
+    # DNAMiteMulticlassClassifier,
     DNAMiteSurvival
 )
 # from .drsa import DRSA
