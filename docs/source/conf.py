@@ -1,6 +1,6 @@
 import os
 import sys
-sys.path.insert(0, os.path.abspath('../../'))
+sys.path.insert(0, os.path.abspath('../..'))
 
 # Configuration file for the Sphinx documentation builder.
 #
@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.abspath('../../'))
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = 'dnamite'
-copyright = '2024, Mike Van Ness'
+copyright = '2025, Mike Van Ness'
 author = 'Mike Van Ness'
 release = '0.1.0'
 
