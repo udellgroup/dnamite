@@ -57,19 +57,19 @@ Table 1: Comparison of additive model packages
 
 | Package        | Language | Models           | Feature Selection     | Survival Analysis | Missing Values |
 |----------------|----------|------------------|-----------------------|------------------|----------------|
-| gam            | R        | Splines          | ✗                     | Cox              | ✗              |
-| mgcv           | R        | Splines          | ✗                     | Cox/AFT          | ✗              |
-| mboost         | R        | Splines/Trees    | Boosting              | Cox/AFT          | ✗              |
-| gamlss         | R        | Splines          | ✗                     | Parametric       | ✗              |
-| gamboostLSS    | R        | Splines/Trees    | Boosting              | Parametric       | ✗              |
-| bamlss         | R        | Splines          | Lasso (linear)        | Parametric       | ✗              |
-| cgam           | R        | Splines          | ✗                     | ✗                | ✗              |
-| spikeSlabGAM   | R        | Splines          | Spike-and-Slab        | ✗                | ✗              |
-| neuralGAM      | R        | Neural Nets      | ✗                     | ✗                | ✗              |
-| pyGAM          | Python   | Splines          | ✗                     | ✗                | ✗              |
-| interpretml    | Python   | Trees            | Interactions only     | ✗                | ✓              |
-| PiML           | Python   | Trees/Neural Nets| Post-Hoc              | ✗                | ✗              |
-| dnamite        | Python   | Neural Nets      | Learnable Gates       | Nonparametric    | ✓              |
+| gam            | R        | Splines          | x                     | Cox              | x              |
+| mgcv           | R        | Splines          | x                     | Cox/AFT          | x              |
+| mboost         | R        | Splines/Trees    | Boosting              | Cox/AFT          | x              |
+| gamlss         | R        | Splines          | x                     | Parametric       | x              |
+| gamboostLSS    | R        | Splines/Trees    | Boosting              | Parametric       | x              |
+| bamlss         | R        | Splines          | Lasso (linear)        | Parametric       | x              |
+| cgam           | R        | Splines          | x                     | x                | x              |
+| spikeSlabGAM   | R        | Splines          | Spike-and-Slab        | x                | x              |
+| neuralGAM      | R        | Neural Nets      | x                     | x                | x              |
+| pyGAM          | Python   | Splines          | x                     | x                | x              |
+| interpretml    | Python   | Trees            | Interactions only     | x                | &check;              |
+| PiML           | Python   | Trees/Neural Nets| Post-Hoc              | x                | x              |
+| dnamite        | Python   | Neural Nets      | Learnable Gates       | Nonparametric    | &check;              |
 
 </div>
 
