@@ -1,14 +1,22 @@
 Models
-======
+========
+
+.. toctree::
+   :maxdepth: 1
+   :titlesonly:
+
+   dnamite.models.DNAMiteRegressor
+   dnamite.models.DNAMiteBinaryClassifier
+   dnamite.models.DNAMiteSurvival
 
 .. autoclass:: dnamite.models.DNAMiteRegressor
-   :members:
-   :show-inheritance:
+    :members:
+    :show-inheritance:
 
 .. autoclass:: dnamite.models.DNAMiteBinaryClassifier
-   :members:
-   :show-inheritance:
+    :members:
+    :show-inheritance:
 
 .. autoclass:: dnamite.models.DNAMiteSurvival
-   :members:
-   :show-inheritance:
+    :members:
+    :show-inheritance:
