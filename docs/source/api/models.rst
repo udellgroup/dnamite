@@ -11,12 +11,15 @@ Models
 
 .. autoclass:: dnamite.models.DNAMiteRegressor
     :members:
+    :no-inherited-members:
     :show-inheritance:
 
 .. autoclass:: dnamite.models.DNAMiteBinaryClassifier
     :members:
+    :no-inherited-members:
     :show-inheritance:
 
 .. autoclass:: dnamite.models.DNAMiteSurvival
     :members:
+    :no-inherited-members:
     :show-inheritance:

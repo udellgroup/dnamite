@@ -43,3 +43,9 @@ html_css_files = [
 add_function_parentheses = False
 
 html_logo = '../dynamite.png'
+
+autodoc_default_options = {
+    'members': True,
+    'no-inherited-members': True,
+    'show-inheritance': True,
+}
