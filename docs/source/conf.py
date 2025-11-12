@@ -44,8 +44,8 @@ add_function_parentheses = False
 
 html_logo = '../dynamite.png'
 
-autodoc_default_options = {
-    'members': True,
-    'no-inherited-members': True,
-    'show-inheritance': True,
-}
+# autodoc_default_options = {
+#     'members': True,
+#     'show-inheritance': True,
+#     'inherited-members': False,
+# }

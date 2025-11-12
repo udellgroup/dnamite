@@ -1,25 +1,14 @@
 Models
 ========
 
-.. toctree::
-   :maxdepth: 1
-   :titlesonly:
-
-   dnamite.models.DNAMiteRegressor
-   dnamite.models.DNAMiteBinaryClassifier
-   dnamite.models.DNAMiteSurvival
-
 .. autoclass:: dnamite.models.DNAMiteRegressor
     :members:
-    :no-inherited-members:
-    :show-inheritance:
+    :exclude-members: set_fit_request, set_predict_request, set_score_request
 
 .. autoclass:: dnamite.models.DNAMiteBinaryClassifier
     :members:
-    :no-inherited-members:
-    :show-inheritance:
+    :exclude-members: set_fit_request, set_predict_request, set_score_request, set_predict_proba_request
 
 .. autoclass:: dnamite.models.DNAMiteSurvival
     :members:
-    :no-inherited-members:
-    :show-inheritance:
+    :exclude-members: set_fit_request, set_predict_request, set_score_request
