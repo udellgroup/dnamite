@@ -61,7 +61,7 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         0: Warning, 1: Info, 2: Debug
     random_state : int, optional
         Random seed for reproducibility.
-    censoring_estimator : str, optional (default="km")
+    censor_estimator : str, optional (default="km")
         The estimator to use for estimating the censoring distribution.
         "km" for Kaplan-Meier, "cox" for Cox proportional hazards.
     """
@@ -396,9 +396,9 @@ class DNAMiteSurvival(BaseDNAMiteModel):
         entropy_param=0, 
     ):
         """
-        Perform feature selection. Selected features and pairs will be stored in model.selected_feats_
-        and model.selected_pairs_, respectively. Should be called before fit if feature selection is desired.
-        
+        Perform feature selection. Selected features and pairs will be stored in ``self.selected_feats_``
+        and ``self.selected_pairs_``, respectively. Should be called before fit if feature selection is desired.
+
         Parameters
         ----------
         X : pandas.DataFrame, shape (n_samples, n_features)
