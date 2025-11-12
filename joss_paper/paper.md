@@ -99,4 +99,6 @@ This nonparametric approach is more flexible and produces feature importances an
 
 # Acknowledgements
 
+The authors gratefully acknowledge support from the National Science Foundation (NSF) Award IIS-2233762, the Office of Naval Research (ONR) Awards N000142212825, N000142412306, and N000142312203, and the Alfred P. Sloan Foundation.
+
 # References
